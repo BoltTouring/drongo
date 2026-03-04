@@ -8,6 +8,7 @@ open module com.sparrowwallet.drongo {
     requires ch.qos.logback.classic;
     requires org.dnsjava;
     requires com.github.benmanes.caffeine;
+    requires java.net.http;
     exports com.sparrowwallet.drongo;
     exports com.sparrowwallet.drongo.psbt;
     exports com.sparrowwallet.drongo.protocol;
@@ -22,5 +23,6 @@ open module com.sparrowwallet.drongo {
     exports com.sparrowwallet.drongo.wallet.bip93;
     exports com.sparrowwallet.drongo.wallet.slip39;
     exports com.sparrowwallet.drongo.silentpayments;
+    exports com.sparrowwallet.drongo.nip05;
     exports org.bitcoin;
 }

@@ -37,9 +37,18 @@ dependencies {
     testRuntimeOnly('org.junit.platform:junit-platform-launcher')
 }
 
+compileJava {
+    options.compilerArgs.addAll(["--enable-preview"])
+    exclude '**/crypto/X25519Key.java'
+}
+
+compileTestJava {
+    options.compilerArgs.addAll(["--enable-preview"])
+}
+
 test {
     useJUnitPlatform()
-    jvmArgs = ["--enable-native-access=ALL-UNNAMED"]
+    jvmArgs = ["--enable-native-access=ALL-UNNAMED", "--enable-preview"]
 }
 
 processResources {
