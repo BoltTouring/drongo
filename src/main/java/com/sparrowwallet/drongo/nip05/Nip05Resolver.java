@@ -1,5 +1,8 @@
 package com.sparrowwallet.drongo.nip05;
 
+import com.sparrowwallet.drongo.Utils;
+import com.sparrowwallet.drongo.crypto.SchnorrSignature;
+import com.sparrowwallet.drongo.protocol.Sha256Hash;
 import com.sparrowwallet.drongo.silentpayments.SilentPaymentAddress;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,8 +28,9 @@ import java.util.regex.Pattern;
  * 1. HTTP GET https://domain/.well-known/nostr.json?name=user
  * 2. Extract hex pubkey from response
  * 3. Query Nostr relays for kind 0 (profile metadata) event
- * 4. Extract "sp" field from profile content
- * 5. Parse as SilentPaymentAddress
+ * 4. Verify the event's Schnorr signature (BIP 340) against the pubkey
+ * 5. Extract "sp" field from profile content
+ * 6. Parse as SilentPaymentAddress
  */
 public class Nip05Resolver {
     private static final Logger log = LoggerFactory.getLogger(Nip05Resolver.class);
@@ -47,6 +51,13 @@ public class Nip05Resolver {
     private static final Pattern HEX_PUBKEY_PATTERN = Pattern.compile("\"([0-9a-f]{64})\"");
     private static final Pattern RELAY_URLS_PATTERN = Pattern.compile("\"(wss?://[^\"]+)\"");
     private static final Pattern SP_FIELD_PATTERN = Pattern.compile("\"sp\"\\s*:\\s*\"(sp1[a-zA-HJ-NP-Z0-9]+)\"");
+
+    // Patterns for extracting Nostr event fields
+    private static final Pattern EVENT_PUBKEY_PATTERN = Pattern.compile("\"pubkey\"\\s*:\\s*\"([0-9a-f]{64})\"");
+    private static final Pattern EVENT_ID_PATTERN = Pattern.compile("\"id\"\\s*:\\s*\"([0-9a-f]{64})\"");
+    private static final Pattern EVENT_SIG_PATTERN = Pattern.compile("\"sig\"\\s*:\\s*\"([0-9a-f]{128})\"");
+    private static final Pattern EVENT_KIND_PATTERN = Pattern.compile("\"kind\"\\s*:\\s*(\\d+)");
+    private static final Pattern EVENT_CREATED_AT_PATTERN = Pattern.compile("\"created_at\"\\s*:\\s*(\\d+)");
 
     private final String hrn;
     private final String user;
@@ -109,14 +120,28 @@ public class Nip05Resolver {
             relays = combined;
         }
 
-        // Step 4: Query relays for kind 0 event
-        String profileJson = queryRelaysForProfile(pubkey, relays);
-        if(profileJson == null) {
+        // Step 4: Query relays for kind 0 event (returns raw event JSON)
+        String rawEvent = queryRelaysForProfile(pubkey, relays);
+        if(rawEvent == null) {
             log.debug("No kind 0 event found for " + pubkey + " on any relay");
             return Optional.empty();
         }
 
-        // Step 5: Extract SP address from profile
+        // Step 5: Verify the event signature
+        if(!verifyEventSignature(rawEvent, pubkey)) {
+            log.warn("Event signature verification FAILED for " + hrn + " — possible relay tampering");
+            throw new Nip05Exception("Nostr event signature verification failed for " + hrn + ". The event may have been tampered with.");
+        }
+        log.debug("Event signature verified for " + hrn);
+
+        // Step 6: Extract content from verified event
+        String profileJson = extractEventContent(rawEvent);
+        if(profileJson == null) {
+            log.debug("Could not extract content from verified event for " + hrn);
+            return Optional.empty();
+        }
+
+        // Step 7: Extract SP address from profile
         String spAddress = extractSpAddress(profileJson);
         if(spAddress == null) {
             log.debug("No 'sp' field found in profile for " + hrn);
@@ -124,7 +149,7 @@ public class Nip05Resolver {
         }
         log.debug("Found SP address for " + hrn + ": " + spAddress.substring(0, Math.min(20, spAddress.length())) + "...");
 
-        // Step 6: Parse SP address
+        // Step 8: Parse SP address
         try {
             SilentPaymentAddress silentPaymentAddress = SilentPaymentAddress.from(spAddress);
             Nip05Payment payment = new Nip05Payment(hrn, silentPaymentAddress, pubkey);
@@ -133,6 +158,330 @@ public class Nip05Resolver {
         } catch(Exception e) {
             throw new Nip05Exception("Invalid Silent Payment address in profile for " + hrn + ": " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Verify the Schnorr signature on a Nostr event.
+     *
+     * Nostr events are signed per NIP-01:
+     * 1. Serialize: [0, pubkey, created_at, kind, tags, content]
+     * 2. SHA-256 hash the serialized JSON → event ID
+     * 3. Verify that event.id matches the computed hash
+     * 4. Verify that event.sig is a valid BIP-340 Schnorr signature of the event ID using the pubkey
+     *
+     * @param rawEvent the raw event JSON object (the third element of the EVENT message)
+     * @param expectedPubkey the hex pubkey we expect the event to be signed by
+     * @return true if the signature is valid, false otherwise
+     */
+    boolean verifyEventSignature(String rawEvent, String expectedPubkey) {
+        try {
+            // Extract event fields
+            String eventPubkey = extractField(rawEvent, EVENT_PUBKEY_PATTERN);
+            String eventId = extractField(rawEvent, EVENT_ID_PATTERN);
+            String eventSig = extractField(rawEvent, EVENT_SIG_PATTERN);
+            String eventKind = extractField(rawEvent, EVENT_KIND_PATTERN);
+            String eventCreatedAt = extractField(rawEvent, EVENT_CREATED_AT_PATTERN);
+
+            if(eventPubkey == null || eventId == null || eventSig == null || eventKind == null || eventCreatedAt == null) {
+                log.debug("Missing required event fields for signature verification");
+                return false;
+            }
+
+            // Verify the pubkey matches what we expect from NIP-05
+            if(!eventPubkey.equals(expectedPubkey)) {
+                log.debug("Event pubkey " + eventPubkey + " does not match expected pubkey " + expectedPubkey);
+                return false;
+            }
+
+            // Extract tags and content as raw JSON strings for serialization
+            String tagsJson = extractTagsJson(rawEvent);
+            String contentJsonRaw = extractContentJsonRaw(rawEvent);
+
+            if(tagsJson == null || contentJsonRaw == null) {
+                log.debug("Could not extract tags or content for event serialization");
+                return false;
+            }
+
+            // Normalize the content JSON: decode unicode escapes and re-encode canonically.
+            // Relays may re-encode characters like > as unicode escapes, which changes the hash.
+            // NIP-01 requires the canonical serialization to match what was originally signed.
+            String contentJson = normalizeJsonString(contentJsonRaw);
+
+            // Also normalize tags — relay may re-encode unicode in tag values
+            String normalizedTagsJson = normalizeJsonArray(tagsJson);
+
+            log.debug("Normalized content JSON (first 200 chars): " + contentJson.substring(0, Math.min(200, contentJson.length())));
+
+            // Serialize per NIP-01: [0,"<pubkey>",<created_at>,<kind>,<tags>,<content>]
+            String serialized = "[0,\"" + eventPubkey + "\"," + eventCreatedAt + "," + eventKind + "," + normalizedTagsJson + "," + contentJson + "]";
+            log.debug("Serialized event (first 500 chars): " + serialized.substring(0, Math.min(500, serialized.length())));
+
+            // Compute SHA-256 of the serialized event
+            byte[] hash = Sha256Hash.hash(serialized.getBytes(StandardCharsets.UTF_8));
+            String computedId = Utils.bytesToHex(hash);
+
+            // Verify the event ID matches the computed hash
+            if(!computedId.equals(eventId)) {
+                log.debug("Computed event ID " + computedId + " does not match claimed ID " + eventId);
+                return false;
+            }
+
+            // Verify the Schnorr signature
+            byte[] sigBytes = Utils.hexToBytes(eventSig);
+            byte[] pubkeyBytes = Utils.hexToBytes(eventPubkey);
+            SchnorrSignature signature = SchnorrSignature.decode(sigBytes);
+
+            return signature.verify(hash, pubkeyBytes);
+        } catch(Exception e) {
+            log.debug("Event signature verification error: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Normalize a JSON string value by decoding all unicode escapes and re-encoding canonically.
+     * Input must be a quoted JSON string (e.g., "hello world" with escapes).
+     * Output is the canonical JSON encoding where only required characters are escaped.
+     *
+     * This is necessary because relays may re-encode characters (e.g., > as unicode escapes),
+     * but the event ID was computed using the canonical form from the signing client.
+     */
+    String normalizeJsonString(String quotedJsonString) {
+        if(quotedJsonString == null || quotedJsonString.length() < 2) {
+            return quotedJsonString;
+        }
+
+        // Strip the outer quotes
+        String inner = quotedJsonString.substring(1, quotedJsonString.length() - 1);
+
+        // Decode all escape sequences to get the actual string value
+        StringBuilder decoded = new StringBuilder();
+        boolean escaped = false;
+        for(int i = 0; i < inner.length(); i++) {
+            char c = inner.charAt(i);
+            if(escaped) {
+                switch(c) {
+                    case '"': decoded.append('"'); break;
+                    case '\\': decoded.append('\\'); break;
+                    case '/': decoded.append('/'); break;
+                    case 'n': decoded.append('\n'); break;
+                    case 'r': decoded.append('\r'); break;
+                    case 't': decoded.append('\t'); break;
+                    case 'b': decoded.append('\b'); break;
+                    case 'f': decoded.append('\f'); break;
+                    case 'u':
+                        if(i + 4 < inner.length()) {
+                            String hex = inner.substring(i + 1, i + 5);
+                            try {
+                                int codePoint = Integer.parseInt(hex, 16);
+                                // Handle surrogate pairs for characters above U+FFFF
+                                if(Character.isHighSurrogate((char)codePoint) && i + 10 < inner.length()
+                                        && inner.charAt(i + 5) == '\\' && inner.charAt(i + 6) == 'u') {
+                                    String lowHex = inner.substring(i + 7, i + 11);
+                                    int lowSurrogate = Integer.parseInt(lowHex, 16);
+                                    decoded.append(Character.toChars(Character.toCodePoint((char)codePoint, (char)lowSurrogate)));
+                                    i += 10;
+                                } else {
+                                    decoded.append((char)codePoint);
+                                    i += 4;
+                                }
+                            } catch(NumberFormatException e) {
+                                decoded.append('u');
+                            }
+                        }
+                        break;
+                    default: decoded.append(c); break;
+                }
+                escaped = false;
+            } else if(c == '\\') {
+                escaped = true;
+            } else {
+                decoded.append(c);
+            }
+        }
+
+        // Re-encode as canonical JSON string (minimal escaping)
+        StringBuilder encoded = new StringBuilder("\"");
+        for(int i = 0; i < decoded.length(); i++) {
+            char c = decoded.charAt(i);
+            switch(c) {
+                case '"': encoded.append("\\\""); break;
+                case '\\': encoded.append("\\\\"); break;
+                case '\n': encoded.append("\\n"); break;
+                case '\r': encoded.append("\\r"); break;
+                case '\t': encoded.append("\\t"); break;
+                case '\b': encoded.append("\\b"); break;
+                case '\f': encoded.append("\\f"); break;
+                default:
+                    if(c < 0x20) {
+                        encoded.append("\\");
+                        encoded.append(String.format("u%04x", (int)c));
+                    } else {
+                        encoded.append(c);
+                    }
+                    break;
+            }
+        }
+        encoded.append("\"");
+
+        return encoded.toString();
+    }
+
+    /**
+     * Normalize a JSON array by decoding and re-encoding all string values within it.
+     * This handles the case where relay may re-encode unicode in tag values.
+     */
+    String normalizeJsonArray(String jsonArray) {
+        if(jsonArray == null) {
+            return null;
+        }
+
+        StringBuilder result = new StringBuilder();
+        boolean inString = false;
+        boolean escaped = false;
+        int stringStart = -1;
+
+        for(int i = 0; i < jsonArray.length(); i++) {
+            char c = jsonArray.charAt(i);
+            if(escaped) {
+                escaped = false;
+                continue;
+            }
+            if(c == '\\' && inString) {
+                escaped = true;
+                continue;
+            }
+            if(c == '"') {
+                if(!inString) {
+                    inString = true;
+                    stringStart = i;
+                } else {
+                    inString = false;
+                    // Extract the quoted string and normalize it
+                    String quotedStr = jsonArray.substring(stringStart, i + 1);
+                    String normalized = normalizeJsonString(quotedStr);
+                    result.append(normalized);
+                    stringStart = -1;
+                    continue;
+                }
+                continue;
+            }
+            if(!inString) {
+                result.append(c);
+            }
+        }
+
+        return result.toString();
+    }
+
+    /**
+     * Extract the "tags" field as raw JSON from the event.
+     * Tags is a JSON array of arrays, e.g. [["p","abc"],["e","def"]]
+     */
+    String extractTagsJson(String eventJson) {
+        int tagsIdx = eventJson.indexOf("\"tags\"");
+        if(tagsIdx < 0) {
+            return null;
+        }
+
+        int colonIdx = eventJson.indexOf(':', tagsIdx + 5);
+        if(colonIdx < 0) {
+            return null;
+        }
+
+        // Skip whitespace to find the opening bracket
+        int start = colonIdx + 1;
+        while(start < eventJson.length() && Character.isWhitespace(eventJson.charAt(start))) {
+            start++;
+        }
+
+        if(start >= eventJson.length() || eventJson.charAt(start) != '[') {
+            return null;
+        }
+
+        // Find the matching closing bracket, accounting for nested arrays
+        int depth = 0;
+        boolean inString = false;
+        boolean escaped = false;
+        for(int i = start; i < eventJson.length(); i++) {
+            char c = eventJson.charAt(i);
+            if(escaped) {
+                escaped = false;
+                continue;
+            }
+            if(c == '\\' && inString) {
+                escaped = true;
+                continue;
+            }
+            if(c == '"') {
+                inString = !inString;
+                continue;
+            }
+            if(!inString) {
+                if(c == '[') depth++;
+                else if(c == ']') {
+                    depth--;
+                    if(depth == 0) {
+                        return eventJson.substring(start, i + 1);
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Extract the "content" field as a raw JSON string (including quotes) from the event.
+     * This preserves the exact JSON encoding needed for serialization/hashing.
+     */
+    String extractContentJsonRaw(String eventJson) {
+        int contentIdx = eventJson.indexOf("\"content\"");
+        if(contentIdx < 0) {
+            return null;
+        }
+
+        int colonIdx = eventJson.indexOf(':', contentIdx + 9);
+        if(colonIdx < 0) {
+            return null;
+        }
+
+        // Skip whitespace to find the opening quote
+        int start = colonIdx + 1;
+        while(start < eventJson.length() && Character.isWhitespace(eventJson.charAt(start))) {
+            start++;
+        }
+
+        if(start >= eventJson.length() || eventJson.charAt(start) != '"') {
+            return null;
+        }
+
+        // Find the closing quote, handling escapes
+        boolean escaped = false;
+        for(int i = start + 1; i < eventJson.length(); i++) {
+            char c = eventJson.charAt(i);
+            if(escaped) {
+                escaped = false;
+                continue;
+            }
+            if(c == '\\') {
+                escaped = true;
+                continue;
+            }
+            if(c == '"') {
+                return eventJson.substring(start, i + 1);
+            }
+        }
+
+        return null;
+    }
+
+    private String extractField(String json, Pattern pattern) {
+        Matcher matcher = pattern.matcher(json);
+        if(matcher.find()) {
+            return matcher.group(1);
+        }
+        return null;
     }
 
     private String httpGet(String url) throws Exception {
@@ -205,7 +554,7 @@ public class Nip05Resolver {
 
     /**
      * Query Nostr relays for the kind 0 (metadata) event for the given pubkey.
-     * Tries relays sequentially, returns the first successful result.
+     * Tries relays sequentially, returns the first successful raw event JSON.
      */
     String queryRelaysForProfile(String pubkey, List<String> relays) {
         // Nostr subscription request: REQ with filter for kind 0
@@ -229,7 +578,7 @@ public class Nip05Resolver {
 
     /**
      * Connect to a single relay via WebSocket, send a subscription, and read the response.
-     * Returns the content field of the kind 0 event, or null if not found.
+     * Returns the raw event JSON object (third element of the EVENT message array), or null if not found.
      */
     String queryRelay(String relayUrl, String reqMessage, String closeMessage, String subscriptionId) throws Exception {
         CompletableFuture<String> resultFuture = new CompletableFuture<>();
@@ -296,6 +645,8 @@ public class Nip05Resolver {
      * - ["EVENT", subscription_id, event_object] — an event matching our subscription
      * - ["EOSE", subscription_id] — end of stored events
      * - ["NOTICE", message] — relay notice
+     *
+     * Now returns the raw event JSON object (not just the content) for signature verification.
      */
     void handleRelayMessage(String message, String subscriptionId, CompletableFuture<String> resultFuture) {
         if(resultFuture.isDone()) {
@@ -304,12 +655,10 @@ public class Nip05Resolver {
 
         // Check for EVENT message
         if(message.startsWith("[\"EVENT\"")) {
-            // Extract the content field from the kind 0 event
-            // The event is the third element: ["EVENT", "sub_id", {event}]
-            // The content field contains the profile JSON as a string
-            String content = extractEventContent(message);
-            if(content != null) {
-                resultFuture.complete(content);
+            // Extract the raw event object (third element of the array)
+            String rawEvent = extractRawEventObject(message);
+            if(rawEvent != null) {
+                resultFuture.complete(rawEvent);
                 return;
             }
         }
@@ -323,7 +672,51 @@ public class Nip05Resolver {
     }
 
     /**
-     * Extract the "content" field value from a Nostr EVENT message.
+     * Extract the raw event JSON object from an EVENT message.
+     * EVENT messages are: ["EVENT", "subscription_id", {event_object}]
+     * We need the {event_object} part as-is for signature verification.
+     */
+    String extractRawEventObject(String eventMessage) {
+        // Find the opening brace of the event object
+        int braceStart = eventMessage.indexOf('{');
+        if(braceStart < 0) {
+            return null;
+        }
+
+        // Find the matching closing brace
+        int depth = 0;
+        boolean inString = false;
+        boolean escaped = false;
+        for(int i = braceStart; i < eventMessage.length(); i++) {
+            char c = eventMessage.charAt(i);
+            if(escaped) {
+                escaped = false;
+                continue;
+            }
+            if(c == '\\' && inString) {
+                escaped = true;
+                continue;
+            }
+            if(c == '"') {
+                inString = !inString;
+                continue;
+            }
+            if(!inString) {
+                if(c == '{') depth++;
+                else if(c == '}') {
+                    depth--;
+                    if(depth == 0) {
+                        return eventMessage.substring(braceStart, i + 1);
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Extract the "content" field value from a Nostr event object.
      * The content of a kind 0 event is a JSON string containing the profile metadata.
      * It is itself JSON-encoded (escaped) within the event object.
      */

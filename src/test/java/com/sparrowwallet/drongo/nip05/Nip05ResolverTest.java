@@ -91,9 +91,9 @@ public class Nip05ResolverTest {
     @Test
     public void extractEventContentTest() {
         Nip05Resolver resolver = new Nip05Resolver("_@bushbashjapan.fyi");
-        // Simulated EVENT message with escaped JSON content
-        String eventMessage = "[\"EVENT\",\"sub123\",{\"id\":\"abc\",\"kind\":0,\"content\":\"{\\\"name\\\":\\\"Test\\\",\\\"sp\\\":\\\"sp1qqtest\\\"}\",\"created_at\":1234}]";
-        String content = resolver.extractEventContent(eventMessage);
+        // Raw event object (already extracted from EVENT message)
+        String eventObject = "{\"id\":\"abc\",\"kind\":0,\"content\":\"{\\\"name\\\":\\\"Test\\\",\\\"sp\\\":\\\"sp1qqtest\\\"}\",\"created_at\":1234}";
+        String content = resolver.extractEventContent(eventObject);
         Assertions.assertNotNull(content);
         Assertions.assertTrue(content.contains("\"name\":\"Test\""));
         Assertions.assertTrue(content.contains("\"sp\":\"sp1qqtest\""));
@@ -102,10 +102,85 @@ public class Nip05ResolverTest {
     @Test
     public void extractEventContentWithUnicodeTest() {
         Nip05Resolver resolver = new Nip05Resolver("_@bushbashjapan.fyi");
-        String eventMessage = "[\"EVENT\",\"sub123\",{\"content\":\"{\\\"name\\\":\\\"\\u30c6\\u30b9\\u30c8\\\"}\"}]";
-        String content = resolver.extractEventContent(eventMessage);
+        String eventObject = "{\"content\":\"{\\\"name\\\":\\\"\\u30c6\\u30b9\\u30c8\\\"}\"}";
+        String content = resolver.extractEventContent(eventObject);
         Assertions.assertNotNull(content);
         Assertions.assertTrue(content.contains("テスト")); // Japanese for "test"
+    }
+
+    // --- Raw event extraction tests ---
+
+    @Test
+    public void extractRawEventObjectTest() {
+        Nip05Resolver resolver = new Nip05Resolver("_@bushbashjapan.fyi");
+        String eventMessage = "[\"EVENT\",\"sub123\",{\"id\":\"abc123\",\"kind\":0,\"content\":\"{\\\"name\\\":\\\"Test\\\"}\",\"tags\":[]}]";
+        String rawEvent = resolver.extractRawEventObject(eventMessage);
+        Assertions.assertNotNull(rawEvent);
+        Assertions.assertTrue(rawEvent.startsWith("{"));
+        Assertions.assertTrue(rawEvent.endsWith("}"));
+        Assertions.assertTrue(rawEvent.contains("\"id\":\"abc123\""));
+    }
+
+    @Test
+    public void extractRawEventObjectWithNestedJsonTest() {
+        Nip05Resolver resolver = new Nip05Resolver("_@bushbashjapan.fyi");
+        // Content contains nested braces inside the JSON string
+        String eventMessage = "[\"EVENT\",\"sub\",{\"id\":\"def\",\"content\":\"{\\\"nested\\\":{\\\"deep\\\":\\\"value\\\"}}\",\"tags\":[]}]";
+        String rawEvent = resolver.extractRawEventObject(eventMessage);
+        Assertions.assertNotNull(rawEvent);
+        Assertions.assertTrue(rawEvent.contains("\"id\":\"def\""));
+    }
+
+    // --- Tags and content extraction for serialization ---
+
+    @Test
+    public void extractTagsJsonTest() {
+        Nip05Resolver resolver = new Nip05Resolver("_@bushbashjapan.fyi");
+        String event = "{\"id\":\"abc\",\"tags\":[[\"p\",\"deadbeef\"],[\"e\",\"cafebabe\"]],\"content\":\"test\"}";
+        String tags = resolver.extractTagsJson(event);
+        Assertions.assertNotNull(tags);
+        Assertions.assertEquals("[[\"p\",\"deadbeef\"],[\"e\",\"cafebabe\"]]", tags);
+    }
+
+    @Test
+    public void extractTagsJsonEmptyTest() {
+        Nip05Resolver resolver = new Nip05Resolver("_@bushbashjapan.fyi");
+        String event = "{\"id\":\"abc\",\"tags\":[],\"content\":\"test\"}";
+        String tags = resolver.extractTagsJson(event);
+        Assertions.assertNotNull(tags);
+        Assertions.assertEquals("[]", tags);
+    }
+
+    @Test
+    public void extractContentJsonRawTest() {
+        Nip05Resolver resolver = new Nip05Resolver("_@bushbashjapan.fyi");
+        String event = "{\"id\":\"abc\",\"content\":\"{\\\"name\\\":\\\"Test\\\"}\",\"tags\":[]}";
+        String content = resolver.extractContentJsonRaw(event);
+        Assertions.assertNotNull(content);
+        Assertions.assertEquals("\"{\\\"name\\\":\\\"Test\\\"}\"", content);
+    }
+
+    // --- Signature verification tests ---
+
+    @Test
+    public void verifyEventSignaturePubkeyMismatchTest() {
+        Nip05Resolver resolver = new Nip05Resolver("_@bushbashjapan.fyi");
+        String event = "{\"id\":\"abc\",\"pubkey\":\"1111111111111111111111111111111111111111111111111111111111111111\"," +
+                "\"sig\":\"0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"," +  // padding to 128
+                "\"kind\":0,\"created_at\":1234,\"tags\":[],\"content\":\"{}\"}";
+        // Expected pubkey is different from event pubkey
+        boolean result = resolver.verifyEventSignature(event, "2222222222222222222222222222222222222222222222222222222222222222");
+        Assertions.assertFalse(result, "Should fail when pubkey doesn't match expected");
+    }
+
+    @Test
+    public void verifyEventSignatureMissingFieldsTest() {
+        Nip05Resolver resolver = new Nip05Resolver("_@bushbashjapan.fyi");
+        // Missing sig field
+        String event = "{\"id\":\"abc\",\"pubkey\":\"1111111111111111111111111111111111111111111111111111111111111111\"," +
+                "\"kind\":0,\"created_at\":1234,\"tags\":[],\"content\":\"{}\"}";
+        boolean result = resolver.verifyEventSignature(event, "1111111111111111111111111111111111111111111111111111111111111111");
+        Assertions.assertFalse(result, "Should fail when required fields are missing");
     }
 
     @Test
@@ -132,13 +207,14 @@ public class Nip05ResolverTest {
         Assertions.assertNull(cached);
     }
 
-    // --- Live integration test (requires network) ---
-    // Uncomment to run manually against a real NIP-05 identity
+    // --- Live integration test (requires network + libsecp256k1) ---
 
     @Test
     public void liveResolveTest() throws Nip05Exception {
         // This test requires network access — resolves _@bushbashjapan.fyi
-        // and verifies it returns a valid Silent Payment address
+        // and verifies it returns a valid Silent Payment address.
+        // With signature verification enabled, this also proves the event
+        // was cryptographically signed by the expected Nostr keypair.
         Nip05Resolver resolver = new Nip05Resolver("_@bushbashjapan.fyi");
         Optional<Nip05Payment> result = resolver.resolve();
         if(result.isPresent()) {
@@ -146,7 +222,7 @@ public class Nip05ResolverTest {
             Assertions.assertTrue(result.get().spAddress().getAddress().startsWith("sp1"), "SP address should start with sp1");
             Assertions.assertNotNull(result.get().nostrPubkey(), "Pubkey should not be null");
             Assertions.assertEquals(64, result.get().nostrPubkey().length(), "Pubkey should be 64 hex chars");
-            System.out.println("Resolved _@bushbashjapan.fyi:");
+            System.out.println("Resolved _@bushbashjapan.fyi (with signature verification):");
             System.out.println("  Pubkey: " + result.get().nostrPubkey());
             System.out.println("  SP Address: " + result.get().spAddress().getAddress());
         } else {
