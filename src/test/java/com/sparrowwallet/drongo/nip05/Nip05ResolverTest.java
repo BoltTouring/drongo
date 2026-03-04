@@ -193,7 +193,7 @@ public class Nip05ResolverTest {
 
     @Test
     public void cacheTest() {
-        Nip05Payment payment = new Nip05Payment("test@example.com", null, "deadbeef");
+        Nip05Payment payment = new Nip05Payment("test@example.com", null, "deadbeef", false);
         Nip05PaymentCache.putNip05Payment("test@example.com", payment);
         Nip05Payment cached = Nip05PaymentCache.getNip05Payment("test@example.com");
         Assertions.assertNotNull(cached);

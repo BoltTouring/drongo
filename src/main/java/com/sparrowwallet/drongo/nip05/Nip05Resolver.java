@@ -83,7 +83,7 @@ public class Nip05Resolver {
      * @throws Nip05Exception if resolution fails due to network or parsing errors
      */
     public Optional<Nip05Payment> resolve() throws Nip05Exception {
-        log.debug("Resolving NIP-05 identifier: " + hrn);
+        log.info("Resolving NIP-05 identifier: " + hrn);
 
         // Step 1: Fetch nostr.json
         String nostrJsonUrl = "https://" + domain + "/.well-known/nostr.json?name=" + user;
@@ -101,15 +101,13 @@ public class Nip05Resolver {
             log.debug("No pubkey found for " + user + " at " + domain);
             return Optional.empty();
         }
-        log.debug("Resolved " + hrn + " to pubkey: " + pubkey);
+        log.info("Resolved " + hrn + " to Nostr pubkey");
 
         // Step 3: Get relay hints (or use fallbacks)
         List<String> relays = extractRelays(nostrJsonResponse, pubkey);
         if(relays.isEmpty()) {
-            log.debug("No relay hints in nostr.json, using fallback relays");
             relays = FALLBACK_RELAYS;
         } else {
-            log.debug("Found relay hints: " + relays);
             // Append fallback relays in case the hinted ones are down
             List<String> combined = new ArrayList<>(relays);
             for(String fallback : FALLBACK_RELAYS) {
@@ -123,7 +121,7 @@ public class Nip05Resolver {
         // Step 4: Query relays for kind 0 event (returns raw event JSON)
         String rawEvent = queryRelaysForProfile(pubkey, relays);
         if(rawEvent == null) {
-            log.debug("No kind 0 event found for " + pubkey + " on any relay");
+            log.info("No kind 0 event found on any relay for " + hrn);
             return Optional.empty();
         }
 
@@ -132,27 +130,26 @@ public class Nip05Resolver {
             log.warn("Event signature verification FAILED for " + hrn + " — possible relay tampering");
             throw new Nip05Exception("Nostr event signature verification failed for " + hrn + ". The event may have been tampered with.");
         }
-        log.debug("Event signature verified for " + hrn);
+        log.info("Event signature verified for " + hrn);
 
         // Step 6: Extract content from verified event
         String profileJson = extractEventContent(rawEvent);
         if(profileJson == null) {
-            log.debug("Could not extract content from verified event for " + hrn);
             return Optional.empty();
         }
 
         // Step 7: Extract SP address from profile
         String spAddress = extractSpAddress(profileJson);
         if(spAddress == null) {
-            log.debug("No 'sp' field found in profile for " + hrn);
+            log.info("No 'sp' field found in Nostr profile for " + hrn);
             return Optional.empty();
         }
-        log.debug("Found SP address for " + hrn + ": " + spAddress.substring(0, Math.min(20, spAddress.length())) + "...");
+        log.info("Found Silent Payment address for " + hrn);
 
         // Step 8: Parse SP address
         try {
             SilentPaymentAddress silentPaymentAddress = SilentPaymentAddress.from(spAddress);
-            Nip05Payment payment = new Nip05Payment(hrn, silentPaymentAddress, pubkey);
+            Nip05Payment payment = new Nip05Payment(hrn, silentPaymentAddress, pubkey, true);
             Nip05PaymentCache.putNip05Payment(hrn, payment);
             return Optional.of(payment);
         } catch(Exception e) {
@@ -183,13 +180,12 @@ public class Nip05Resolver {
             String eventCreatedAt = extractField(rawEvent, EVENT_CREATED_AT_PATTERN);
 
             if(eventPubkey == null || eventId == null || eventSig == null || eventKind == null || eventCreatedAt == null) {
-                log.debug("Missing required event fields for signature verification");
                 return false;
             }
 
             // Verify the pubkey matches what we expect from NIP-05
             if(!eventPubkey.equals(expectedPubkey)) {
-                log.debug("Event pubkey " + eventPubkey + " does not match expected pubkey " + expectedPubkey);
+                log.warn("Event pubkey does not match expected NIP-05 pubkey");
                 return false;
             }
 
@@ -198,7 +194,6 @@ public class Nip05Resolver {
             String contentJsonRaw = extractContentJsonRaw(rawEvent);
 
             if(tagsJson == null || contentJsonRaw == null) {
-                log.debug("Could not extract tags or content for event serialization");
                 return false;
             }
 
@@ -210,11 +205,8 @@ public class Nip05Resolver {
             // Also normalize tags — relay may re-encode unicode in tag values
             String normalizedTagsJson = normalizeJsonArray(tagsJson);
 
-            log.debug("Normalized content JSON (first 200 chars): " + contentJson.substring(0, Math.min(200, contentJson.length())));
-
             // Serialize per NIP-01: [0,"<pubkey>",<created_at>,<kind>,<tags>,<content>]
             String serialized = "[0,\"" + eventPubkey + "\"," + eventCreatedAt + "," + eventKind + "," + normalizedTagsJson + "," + contentJson + "]";
-            log.debug("Serialized event (first 500 chars): " + serialized.substring(0, Math.min(500, serialized.length())));
 
             // Compute SHA-256 of the serialized event
             byte[] hash = Sha256Hash.hash(serialized.getBytes(StandardCharsets.UTF_8));
@@ -222,7 +214,7 @@ public class Nip05Resolver {
 
             // Verify the event ID matches the computed hash
             if(!computedId.equals(eventId)) {
-                log.debug("Computed event ID " + computedId + " does not match claimed ID " + eventId);
+                log.warn("Computed event ID does not match claimed ID — possible tampering");
                 return false;
             }
 
@@ -233,7 +225,7 @@ public class Nip05Resolver {
 
             return signature.verify(hash, pubkeyBytes);
         } catch(Exception e) {
-            log.debug("Event signature verification error: " + e.getMessage());
+            log.warn("Event signature verification error: " + e.getMessage());
             return false;
         }
     }
@@ -594,7 +586,6 @@ public class Nip05Resolver {
                 .buildAsync(URI.create(relayUrl), new WebSocket.Listener() {
                     @Override
                     public void onOpen(WebSocket webSocket) {
-                        log.debug("Connected to relay: " + relayUrl);
                         webSocket.sendText(reqMessage, true);
                         webSocket.request(1);
                     }

@@ -8,8 +8,9 @@ import com.sparrowwallet.drongo.silentpayments.SilentPaymentAddress;
  * @param hrn the human-readable name (user@domain)
  * @param spAddress the resolved Silent Payment address from the kind 0 profile
  * @param nostrPubkey the hex-encoded Nostr public key
+ * @param signatureVerified true if the Nostr event's Schnorr signature was cryptographically verified
  */
-public record Nip05Payment(String hrn, SilentPaymentAddress spAddress, String nostrPubkey) {
+public record Nip05Payment(String hrn, SilentPaymentAddress spAddress, String nostrPubkey, boolean signatureVerified) {
     @Override
     public String toString() {
         return "⚡" + hrn;
