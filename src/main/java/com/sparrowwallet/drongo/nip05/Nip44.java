@@ -75,13 +75,8 @@ public class Nip44 {
         // Use only x-coordinate (32 bytes)
         byte[] sharedX = bigIntTo32Bytes(sharedPoint.getPubKeyPoint().getAffineXCoord().toBigInteger());
 
-        // HKDF-extract with NIP-44 salt
+        // HKDF extract+expand: salt=sha256("nip44-v2"), ikm=shared_x, info=empty
         HKDFBytesGenerator hkdf = new HKDFBytesGenerator(new SHA256Digest());
-        hkdf.init(HKDFParameters.skipExpandExtract(HKDF_SALT, sharedX));
-
-        // Extract only (no expand info)
-        // Actually NIP-44 uses: extract then expand with empty info
-        hkdf = new HKDFBytesGenerator(new SHA256Digest());
         hkdf.init(new HKDFParameters(sharedX, HKDF_SALT, new byte[0]));
         byte[] conversationKey = new byte[32];
         hkdf.generateBytes(conversationKey, 0, 32);
