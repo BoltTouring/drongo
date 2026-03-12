@@ -151,13 +151,12 @@ public class Nip46BunkerClient implements AutoCloseable {
         connected.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
 
         // Always send connect request — user must approve in their bunker app
-        // NIP-46: connect params = [<client_pubkey>, <optional_secret>]
-        // The signer needs to know WHO is connecting
+        // NIP-46 spec: connect params = [<remote_user_pubkey>, <optional_secret>]
         String connectParams;
         if(secret != null) {
-            connectParams = "[\"" + localPubKeyHex + "\",\"" + secret + "\"]";
+            connectParams = "[\"" + signerPubKeyHex + "\",\"" + secret + "\"]";
         } else {
-            connectParams = "[\"" + localPubKeyHex + "\"]";
+            connectParams = "[\"" + signerPubKeyHex + "\"]";
         }
         sendRequest("connect", connectParams, CONNECT_TIMEOUT);
 

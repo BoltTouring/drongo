@@ -4,7 +4,6 @@ import com.sparrowwallet.drongo.Utils;
 import com.sparrowwallet.drongo.crypto.ECKey;
 import com.sparrowwallet.drongo.protocol.Sha256Hash;
 import org.bouncycastle.crypto.engines.ChaCha7539Engine;
-import org.bouncycastle.crypto.macs.Poly1305;
 import org.bouncycastle.crypto.params.KeyParameter;
 import org.bouncycastle.crypto.params.ParametersWithIV;
 import org.bouncycastle.crypto.digests.SHA256Digest;
@@ -16,15 +15,13 @@ import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayOutputStream;
 import java.math.BigInteger;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.Arrays;
 
 /**
  * NIP-44 v2 encryption/decryption.
- * Uses secp256k1 ECDH → HKDF-SHA256 → ChaCha20-Poly1305 → HMAC-SHA256.
+ * Uses secp256k1 ECDH → HKDF-SHA256 → ChaCha20 (plain) → HMAC-SHA256.
  *
  * Reference: https://github.com/nostr-protocol/nips/blob/master/44.md
  */
@@ -100,12 +97,11 @@ public class Nip44 {
         // Pad plaintext
         byte[] padded = pad(plaintextBytes);
 
-        // Encrypt with ChaCha20-Poly1305
-        byte[] ciphertext = chacha20Poly1305Encrypt(chachaKey, chachaNonce, padded);
+        // Encrypt with plain ChaCha20 (NOT ChaCha20-Poly1305)
+        byte[] ciphertext = chacha20(chachaKey, chachaNonce, padded);
 
         // HMAC-SHA256(hmac_key, nonce || ciphertext)
-        byte[] hmacInput = Utils.concat(nonce, ciphertext);
-        byte[] mac = hmacSha256(hmacKey, hmacInput);
+        byte[] mac = hmacSha256(hmacKey, Utils.concat(nonce, ciphertext));
 
         // Assemble payload: version(1) || nonce(32) || ciphertext(variable) || mac(32)
         ByteArrayOutputStream payload = new ByteArrayOutputStream();
@@ -120,7 +116,7 @@ public class Nip44 {
     static String decryptWithConversationKey(byte[] conversationKey, String base64Payload) {
         byte[] payload = java.util.Base64.getDecoder().decode(base64Payload);
 
-        if(payload.length < 99) { // 1 + 32 + 32 + 2 + 16 + 32 minimum
+        if(payload.length < 97) { // 1 + 32 + 32 (min padded) + 32 (hmac)
             throw new IllegalArgumentException("Payload too short");
         }
 
@@ -140,14 +136,13 @@ public class Nip44 {
         byte[] hmacKey = Arrays.copyOfRange(keys, 44, 76);
 
         // Verify HMAC
-        byte[] hmacInput = Utils.concat(nonce, ciphertext);
-        byte[] expectedMac = hmacSha256(hmacKey, hmacInput);
+        byte[] expectedMac = hmacSha256(hmacKey, Utils.concat(nonce, ciphertext));
         if(!constantTimeEquals(mac, expectedMac)) {
             throw new SecurityException("NIP-44 HMAC verification failed");
         }
 
-        // Decrypt
-        byte[] padded = chacha20Poly1305Decrypt(chachaKey, chachaNonce, ciphertext);
+        // Decrypt with plain ChaCha20
+        byte[] padded = chacha20(chachaKey, chachaNonce, ciphertext);
 
         // Unpad
         return unpad(padded);
@@ -161,87 +156,16 @@ public class Nip44 {
         return keys;
     }
 
-    private static byte[] chacha20Poly1305Encrypt(byte[] key, byte[] nonce, byte[] plaintext) {
+    /**
+     * Plain ChaCha20 stream cipher (no Poly1305 AEAD).
+     * NIP-44 uses ChaCha20 for encryption and a separate HMAC-SHA256 for authentication.
+     */
+    private static byte[] chacha20(byte[] key, byte[] nonce, byte[] data) {
         ChaCha7539Engine chacha = new ChaCha7539Engine();
-        Poly1305 poly = new Poly1305();
-
-        // Initialize ChaCha20
         chacha.init(true, new ParametersWithIV(new KeyParameter(key), nonce));
-
-        // Generate Poly1305 key from first 32 bytes of ChaCha20 keystream
-        byte[] polyKey = new byte[64];
-        chacha.processBytes(polyKey, 0, 64, polyKey, 0);
-        byte[] polyKeyBlock = Arrays.copyOfRange(polyKey, 0, 32);
-
-        // Encrypt plaintext
-        byte[] ciphertext = new byte[plaintext.length];
-        chacha.processBytes(plaintext, 0, plaintext.length, ciphertext, 0);
-
-        // Compute Poly1305 tag
-        poly.init(new KeyParameter(polyKeyBlock));
-        poly.update(ciphertext, 0, ciphertext.length);
-
-        // Pad to 16 bytes
-        int padLen = (16 - (ciphertext.length % 16)) % 16;
-        if(padLen > 0) {
-            poly.update(new byte[padLen], 0, padLen);
-        }
-
-        // AAD length (0) + ciphertext length as little-endian uint64
-        byte[] lengths = new byte[16];
-        ByteBuffer.wrap(lengths).order(ByteOrder.LITTLE_ENDIAN).putLong(0, 0L).putLong(8, ciphertext.length);
-        poly.update(lengths, 0, 16);
-
-        byte[] tag = new byte[16];
-        poly.doFinal(tag, 0);
-
-        return Utils.concat(ciphertext, tag);
-    }
-
-    private static byte[] chacha20Poly1305Decrypt(byte[] key, byte[] nonce, byte[] ciphertextWithTag) {
-        if(ciphertextWithTag.length < 16) {
-            throw new SecurityException("Ciphertext too short for Poly1305 tag");
-        }
-
-        byte[] ciphertext = Arrays.copyOfRange(ciphertextWithTag, 0, ciphertextWithTag.length - 16);
-        byte[] tag = Arrays.copyOfRange(ciphertextWithTag, ciphertextWithTag.length - 16, ciphertextWithTag.length);
-
-        ChaCha7539Engine chacha = new ChaCha7539Engine();
-        Poly1305 poly = new Poly1305();
-
-        // Initialize ChaCha20
-        chacha.init(true, new ParametersWithIV(new KeyParameter(key), nonce));
-
-        // Generate Poly1305 key
-        byte[] polyKey = new byte[64];
-        chacha.processBytes(polyKey, 0, 64, polyKey, 0);
-        byte[] polyKeyBlock = Arrays.copyOfRange(polyKey, 0, 32);
-
-        // Verify Poly1305 tag before decrypting
-        poly.init(new KeyParameter(polyKeyBlock));
-        poly.update(ciphertext, 0, ciphertext.length);
-        int padLen = (16 - (ciphertext.length % 16)) % 16;
-        if(padLen > 0) {
-            poly.update(new byte[padLen], 0, padLen);
-        }
-        byte[] lengths = new byte[16];
-        ByteBuffer.wrap(lengths).order(ByteOrder.LITTLE_ENDIAN).putLong(0, 0L).putLong(8, ciphertext.length);
-        poly.update(lengths, 0, 16);
-        byte[] expectedTag = new byte[16];
-        poly.doFinal(expectedTag, 0);
-
-        if(!constantTimeEquals(tag, expectedTag)) {
-            throw new SecurityException("Poly1305 authentication failed");
-        }
-
-        // Decrypt (re-init chacha since we consumed the keystream for poly key)
-        chacha.init(true, new ParametersWithIV(new KeyParameter(key), nonce));
-        byte[] skip = new byte[64];
-        chacha.processBytes(skip, 0, 64, skip, 0); // Skip poly key block
-
-        byte[] plaintext = new byte[ciphertext.length];
-        chacha.processBytes(ciphertext, 0, ciphertext.length, plaintext, 0);
-        return plaintext;
+        byte[] output = new byte[data.length];
+        chacha.processBytes(data, 0, data.length, output, 0);
+        return output;
     }
 
     /**
