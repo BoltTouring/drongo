@@ -71,9 +71,11 @@ public class Nip44 {
         // ECDH: multiply recipient's pubkey by sender's privkey
         ECKey pubKey = ECKey.fromPublicOnly(publicKey);
         BigInteger privKeyInt = new BigInteger(1, privateKey);
-        ECKey sharedPoint = pubKey.multiply(privKeyInt, false);
+        // Multiply and normalize the resulting point (BouncyCastle requires
+        // affine form for coordinate extraction)
+        org.bouncycastle.math.ec.ECPoint sharedPoint = pubKey.getPubKeyPoint().multiply(privKeyInt).normalize();
         // Use only x-coordinate (32 bytes)
-        byte[] sharedX = bigIntTo32Bytes(sharedPoint.getPubKeyPoint().getAffineXCoord().toBigInteger());
+        byte[] sharedX = bigIntTo32Bytes(sharedPoint.getAffineXCoord().toBigInteger());
 
         // HKDF extract+expand: salt=sha256("nip44-v2"), ikm=shared_x, info=empty
         HKDFBytesGenerator hkdf = new HKDFBytesGenerator(new SHA256Digest());

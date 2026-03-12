@@ -36,7 +36,8 @@ public class Nip46BunkerClient implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(Nip46BunkerClient.class);
 
     private static final int KIND_NIP46_REQUEST = 24133;
-    private static final Duration TIMEOUT = Duration.ofSeconds(30);
+    private static final Duration TIMEOUT = Duration.ofSeconds(15);
+    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(90);
 
     private final String signerPubKeyHex;
     private final String relayUrl;
@@ -149,10 +150,14 @@ public class Nip46BunkerClient implements AutoCloseable {
 
         connected.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
 
-        // If there's a secret, send connect request
+        // Always send connect request — user must approve in their bunker app
+        String connectParams;
         if(secret != null) {
-            sendRequest("connect", "[\"" + signerPubKeyHex + "\",\"" + secret + "\"]");
+            connectParams = "[\"" + signerPubKeyHex + "\",\"" + secret + "\"]";
+        } else {
+            connectParams = "[\"" + signerPubKeyHex + "\"]";
         }
+        sendRequest("connect", connectParams, CONNECT_TIMEOUT);
 
         log.info("Connected to bunker at " + relayUrl + " (signer: " + signerPubKeyHex.substring(0, 8) + "...)");
     }
@@ -177,6 +182,10 @@ public class Nip46BunkerClient implements AutoCloseable {
     }
 
     private String sendRequest(String method, String paramsJson) throws Exception {
+        return sendRequest(method, paramsJson, TIMEOUT);
+    }
+
+    private String sendRequest(String method, String paramsJson, Duration timeout) throws Exception {
         String requestId = UUID.randomUUID().toString();
         String rpcJson = "{\"id\":\"" + requestId + "\",\"method\":\"" + method + "\",\"params\":" + paramsJson + "}";
 
@@ -204,10 +213,10 @@ public class Nip46BunkerClient implements AutoCloseable {
         webSocket.sendText("[\"EVENT\"," + eventJson + "]", true);
 
         try {
-            return responseFuture.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            return responseFuture.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
         } catch(TimeoutException e) {
             pendingRequests.remove(requestId);
-            throw new Exception("Bunker request timed out: " + method);
+            throw new Exception("Bunker request timed out: " + method + " (waited " + timeout.toSeconds() + "s — did you approve in your bunker app?)");
         }
     }
 
