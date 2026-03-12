@@ -35,13 +35,39 @@ public class Nip17Receiver {
             "wss://purplepag.es"
     );
 
-    private final byte[] recipientPrivKey;
     private final String recipientPubKeyHex;
+    private final DecryptFunction decryptFn;
 
+    /**
+     * Functional interface for NIP-44 decryption.
+     * Takes the other party's hex pubkey and the ciphertext, returns plaintext.
+     */
+    @FunctionalInterface
+    public interface DecryptFunction {
+        String decrypt(String senderPubKeyHex, String ciphertext) throws Exception;
+    }
+
+    /**
+     * Create a receiver using a local private key for decryption.
+     */
     public Nip17Receiver(byte[] recipientPrivKey) {
-        this.recipientPrivKey = recipientPrivKey;
         ECKey key = ECKey.fromPrivate(recipientPrivKey);
         this.recipientPubKeyHex = Utils.bytesToHex(key.getPubKeyXCoord());
+        this.decryptFn = (senderPubKeyHex, ciphertext) -> {
+            byte[] senderPubKey33 = Nip17Sender.pubKeyHexToCompressed(senderPubKeyHex);
+            return Nip44.decrypt(recipientPrivKey, senderPubKey33, ciphertext);
+        };
+    }
+
+    /**
+     * Create a receiver using a delegate for decryption (e.g. NIP-46 bunker).
+     *
+     * @param recipientPubKeyHex the recipient's 64-char hex pubkey (for relay queries)
+     * @param decryptFn a function that decrypts NIP-44 ciphertext given the sender's pubkey
+     */
+    public Nip17Receiver(String recipientPubKeyHex, DecryptFunction decryptFn) {
+        this.recipientPubKeyHex = recipientPubKeyHex;
+        this.decryptFn = decryptFn;
     }
 
     /**
@@ -97,9 +123,8 @@ public class Nip17Receiver {
             String wrapContent = extractContentField(giftWrapJson);
             if(wrapPubkey == null || wrapContent == null) return null;
 
-            // Decrypt gift wrap → seal
-            byte[] wrapPubKey33 = Nip17Sender.pubKeyHexToCompressed(wrapPubkey);
-            String sealJson = Nip44.decrypt(recipientPrivKey, wrapPubKey33, wrapContent);
+            // Decrypt gift wrap → seal (using delegate — local key or bunker)
+            String sealJson = decryptFn.decrypt(wrapPubkey, wrapContent);
 
             // Extract seal fields
             String sealPubkey = extractField(sealJson, "pubkey");
@@ -110,9 +135,8 @@ public class Nip17Receiver {
             }
             if(sealPubkey == null || sealContent == null) return null;
 
-            // Decrypt seal → rumor
-            byte[] sealPubKey33 = Nip17Sender.pubKeyHexToCompressed(sealPubkey);
-            String rumorJson = Nip44.decrypt(recipientPrivKey, sealPubKey33, sealContent);
+            // Decrypt seal → rumor (using delegate)
+            String rumorJson = decryptFn.decrypt(sealPubkey, sealContent);
 
             // Extract rumor content
             Matcher rumorKindMatcher = KIND_PATTERN.matcher(rumorJson);
