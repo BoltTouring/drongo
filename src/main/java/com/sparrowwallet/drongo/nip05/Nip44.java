@@ -2,14 +2,11 @@ package com.sparrowwallet.drongo.nip05;
 
 import com.sparrowwallet.drongo.Utils;
 import com.sparrowwallet.drongo.crypto.ECKey;
-import com.sparrowwallet.drongo.protocol.Sha256Hash;
 import org.bouncycastle.crypto.engines.ChaCha7539Engine;
 import org.bouncycastle.crypto.params.KeyParameter;
 import org.bouncycastle.crypto.params.ParametersWithIV;
 import org.bouncycastle.crypto.digests.SHA256Digest;
-import org.bouncycastle.crypto.generators.HKDFBytesGenerator;
 import org.bouncycastle.crypto.macs.HMac;
-import org.bouncycastle.crypto.params.HKDFParameters;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -28,7 +25,7 @@ import java.util.Arrays;
 public class Nip44 {
     private static final Logger log = LoggerFactory.getLogger(Nip44.class);
     private static final byte VERSION = 2;
-    private static final byte[] HKDF_SALT = Sha256Hash.hash("nip44-v2".getBytes(StandardCharsets.UTF_8));
+    private static final byte[] HKDF_SALT = "nip44-v2".getBytes(StandardCharsets.UTF_8);
     private static final int MIN_PLAINTEXT_SIZE = 1;
     private static final int MAX_PLAINTEXT_SIZE = 65535;
 
@@ -61,25 +58,19 @@ public class Nip44 {
     }
 
     /**
-     * Compute the conversation key via ECDH + HKDF.
-     * conversation_key = HKDF-extract(salt=sha256("nip44-v2"), ikm=ECDH_x)
+     * Compute the conversation key via ECDH + HKDF-extract.
+     * conversation_key = HKDF-extract(salt=utf8("nip44-v2"), IKM=shared_x)
+     *                  = HMAC-SHA256(key=salt, msg=shared_x)
      */
     static byte[] getConversationKey(byte[] privateKey, byte[] publicKey) {
         // ECDH: multiply recipient's pubkey by sender's privkey
         ECKey pubKey = ECKey.fromPublicOnly(publicKey);
         BigInteger privKeyInt = new BigInteger(1, privateKey);
-        // Multiply and normalize the resulting point (BouncyCastle requires
-        // affine form for coordinate extraction)
         org.bouncycastle.math.ec.ECPoint sharedPoint = pubKey.getPubKeyPoint().multiply(privKeyInt).normalize();
-        // Use only x-coordinate (32 bytes)
         byte[] sharedX = bigIntTo32Bytes(sharedPoint.getAffineXCoord().toBigInteger());
 
-        // HKDF extract+expand: salt=sha256("nip44-v2"), ikm=shared_x, info=empty
-        HKDFBytesGenerator hkdf = new HKDFBytesGenerator(new SHA256Digest());
-        hkdf.init(new HKDFParameters(sharedX, HKDF_SALT, new byte[0]));
-        byte[] conversationKey = new byte[32];
-        hkdf.generateBytes(conversationKey, 0, 32);
-        return conversationKey;
+        // HKDF-extract ONLY: HMAC-SHA256(key=salt, msg=IKM)
+        return hmacSha256(HKDF_SALT, sharedX);
     }
 
     static String encryptWithConversationKey(byte[] conversationKey, byte[] nonce, String plaintext) {
@@ -116,7 +107,7 @@ public class Nip44 {
     static String decryptWithConversationKey(byte[] conversationKey, String base64Payload) {
         byte[] payload = java.util.Base64.getDecoder().decode(base64Payload);
 
-        if(payload.length < 97) { // 1 + 32 + 32 (min padded) + 32 (hmac)
+        if(payload.length < 99) { // 1 + 32 + 34 (min padded=2+32) + 32 (hmac)
             throw new IllegalArgumentException("Payload too short");
         }
 
@@ -148,12 +139,26 @@ public class Nip44 {
         return unpad(padded);
     }
 
+    /**
+     * Derive message keys using HKDF-expand ONLY (no extract).
+     * HKDF-expand(PRK=conversation_key, info=nonce, L=76)
+     */
     private static byte[] deriveMessageKeys(byte[] conversationKey, byte[] nonce) {
-        HKDFBytesGenerator hkdf = new HKDFBytesGenerator(new SHA256Digest());
-        hkdf.init(new HKDFParameters(conversationKey, nonce, new byte[0]));
-        byte[] keys = new byte[76];
-        hkdf.generateBytes(keys, 0, 76);
-        return keys;
+        byte[] result = new byte[76];
+        byte[] prev = new byte[0];
+        int offset = 0;
+        for(int i = 1; offset < 76; i++) {
+            // T(i) = HMAC-SHA256(PRK, T(i-1) || info || i)
+            byte[] input = new byte[prev.length + nonce.length + 1];
+            System.arraycopy(prev, 0, input, 0, prev.length);
+            System.arraycopy(nonce, 0, input, prev.length, nonce.length);
+            input[input.length - 1] = (byte)i;
+            prev = hmacSha256(conversationKey, input);
+            int toCopy = Math.min(prev.length, 76 - offset);
+            System.arraycopy(prev, 0, result, offset, toCopy);
+            offset += toCopy;
+        }
+        return result;
     }
 
     /**
@@ -169,16 +174,16 @@ public class Nip44 {
     }
 
     /**
-     * NIP-44 padding: 2-byte big-endian length prefix + data + zero-pad to next power of 2 (min 32).
+     * NIP-44 padding per spec:
+     * padded_blob = [u16_be(plaintext_len)][plaintext][zero_padding]
+     * total_size = 2 + calc_padded_len(plaintext_len)
      */
     static byte[] pad(byte[] plaintext) {
-        int unpaddedLen = 2 + plaintext.length;
         int paddedLen = calcPaddedLen(plaintext.length);
-        byte[] padded = new byte[paddedLen];
+        byte[] padded = new byte[2 + paddedLen];
         padded[0] = (byte)((plaintext.length >> 8) & 0xFF);
         padded[1] = (byte)(plaintext.length & 0xFF);
         System.arraycopy(plaintext, 0, padded, 2, plaintext.length);
-        // Rest is already zero-filled
         return padded;
     }
 
@@ -190,18 +195,27 @@ public class Nip44 {
         if(dataLen < MIN_PLAINTEXT_SIZE || dataLen > MAX_PLAINTEXT_SIZE || dataLen + 2 > padded.length) {
             throw new IllegalArgumentException("Invalid padding length: " + dataLen);
         }
+        if(padded.length != 2 + calcPaddedLen(dataLen)) {
+            throw new IllegalArgumentException("Invalid padded length: " + padded.length + " expected " + (2 + calcPaddedLen(dataLen)));
+        }
         return new String(padded, 2, dataLen, StandardCharsets.UTF_8);
     }
 
+    /**
+     * NIP-44 padding length calculation (spec pseudocode).
+     * Returns the number of bytes for plaintext+zeros (NOT including the 2-byte prefix).
+     */
     static int calcPaddedLen(int unpaddedLen) {
         if(unpaddedLen <= 0) return 32;
-        int total = unpaddedLen + 2; // 2-byte length prefix
-        if(total <= 32) return 32;
-        // Next power of 2
-        int bits = 32 - Integer.numberOfLeadingZeros(total - 1);
-        int chunk = 1 << bits;
-        if(chunk < total) chunk <<= 1;
-        return chunk;
+        if(unpaddedLen <= 32) return 32;
+        int nextPower = Integer.highestOneBit(unpaddedLen - 1) << 1;
+        int chunk;
+        if(nextPower <= 256) {
+            chunk = 32;
+        } else {
+            chunk = nextPower / 8;
+        }
+        return chunk * (((unpaddedLen - 1) / chunk) + 1);
     }
 
     private static byte[] hmacSha256(byte[] key, byte[] data) {
