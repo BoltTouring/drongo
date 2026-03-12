@@ -10,6 +10,7 @@ import org.slf4j.LoggerFactory;
 import java.math.BigInteger;
 import java.net.URI;
 import java.net.URLDecoder;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.nio.charset.StandardCharsets;
@@ -38,15 +39,18 @@ public class Nip46BunkerClient implements AutoCloseable {
     private static final int KIND_NIP46_REQUEST = 24133;
     private static final Duration TIMEOUT = Duration.ofSeconds(15);
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(90);
+    private static final String DEFAULT_RELAY = "wss://relay.nsec.app";
 
-    private final String signerPubKeyHex;
+    private String signerPubKeyHex; // null until signer connects (nostrconnect flow)
     private final String relayUrl;
     private final String secret;
     private final byte[] localPrivKey;
     private final String localPubKeyHex;
+    private final boolean isNostrConnectFlow;
 
     private WebSocket webSocket;
     private final Map<String, CompletableFuture<String>> pendingRequests = new ConcurrentHashMap<>();
+    private final CompletableFuture<String> signerConnected = new CompletableFuture<>();
     private final StringBuilder messageBuffer = new StringBuilder();
 
     /**
@@ -85,13 +89,32 @@ public class Nip46BunkerClient implements AutoCloseable {
             throw new IllegalArgumentException("Bunker URI must contain a relay parameter");
         }
 
-        return new Nip46BunkerClient(pubkey, relay, secret);
+        return new Nip46BunkerClient(pubkey, relay, secret, false);
     }
 
-    private Nip46BunkerClient(String signerPubKeyHex, String relayUrl, String secret) {
+    /**
+     * Create a client for the nostrconnect:// flow.
+     * Call getNostrConnectUri() to get the URI to paste into nsec.app,
+     * then connect() to wait for the signer to connect back.
+     */
+    public static Nip46BunkerClient forNostrConnect(String relayUrl) {
+        return new Nip46BunkerClient(null, relayUrl != null ? relayUrl : DEFAULT_RELAY, null, true);
+    }
+
+    /**
+     * Generate a nostrconnect:// URI for pasting into nsec.app or Amber.
+     */
+    public String getNostrConnectUri() {
+        return "nostrconnect://" + localPubKeyHex + "?relay=" +
+                URLEncoder.encode(relayUrl, StandardCharsets.UTF_8) +
+                "&metadata=" + URLEncoder.encode("{\"name\":\"Sparrow Wallet\",\"description\":\"Silent Payment notifications\"}", StandardCharsets.UTF_8);
+    }
+
+    private Nip46BunkerClient(String signerPubKeyHex, String relayUrl, String secret, boolean isNostrConnectFlow) {
         this.signerPubKeyHex = signerPubKeyHex;
         this.relayUrl = relayUrl;
         this.secret = secret;
+        this.isNostrConnectFlow = isNostrConnectFlow;
 
         // Generate ephemeral local keypair for this session
         SecureRandom random = new SecureRandom();
@@ -150,17 +173,27 @@ public class Nip46BunkerClient implements AutoCloseable {
 
         connected.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
 
-        // Always send connect request — user must approve in their bunker app
-        // NIP-46 spec: connect params = [<remote_user_pubkey>, <optional_secret>]
-        String connectParams;
-        if(secret != null) {
-            connectParams = "[\"" + signerPubKeyHex + "\",\"" + secret + "\"]";
+        if(isNostrConnectFlow) {
+            // nostrconnect flow: wait for signer to connect to us
+            log.info("Waiting for signer to connect via nostrconnect (relay: " + relayUrl + ")...");
+            try {
+                String signerPubKey = signerConnected.get(CONNECT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                this.signerPubKeyHex = signerPubKey;
+                log.info("Signer connected: " + signerPubKey.substring(0, 8) + "...");
+            } catch(TimeoutException e) {
+                throw new Exception("Timed out waiting for signer — did you paste the nostrconnect URI into your bunker app?");
+            }
         } else {
-            connectParams = "[\"" + signerPubKeyHex + "\"]";
+            // bunker:// flow: send connect request to signer
+            String connectParams;
+            if(secret != null) {
+                connectParams = "[\"" + signerPubKeyHex + "\",\"" + secret + "\"]";
+            } else {
+                connectParams = "[\"" + signerPubKeyHex + "\"]";
+            }
+            sendRequest("connect", connectParams, CONNECT_TIMEOUT);
+            log.info("Connected to bunker at " + relayUrl + " (signer: " + signerPubKeyHex.substring(0, 8) + "...)");
         }
-        sendRequest("connect", connectParams, CONNECT_TIMEOUT);
-
-        log.info("Connected to bunker at " + relayUrl + " (signer: " + signerPubKeyHex.substring(0, 8) + "...)");
     }
 
     /**
@@ -179,6 +212,9 @@ public class Nip46BunkerClient implements AutoCloseable {
      * Get the public key managed by the bunker.
      */
     public String getPublicKey() throws Exception {
+        if(signerPubKeyHex != null) {
+            return signerPubKeyHex;
+        }
         return sendRequest("get_public_key", "[]");
     }
 
@@ -225,16 +261,20 @@ public class Nip46BunkerClient implements AutoCloseable {
         if(!message.startsWith("[\"EVENT\"")) return;
 
         try {
-            // Extract the event object
             int braceStart = message.indexOf('{');
             if(braceStart < 0) return;
             String eventJson = extractEventObject(message, braceStart);
             if(eventJson == null) return;
 
-            // Check it's from the signer
+            // Extract sender pubkey
             Pattern pubkeyPattern = Pattern.compile("\"pubkey\"\\s*:\\s*\"([0-9a-f]{64})\"");
             Matcher pkMatcher = pubkeyPattern.matcher(eventJson);
-            if(!pkMatcher.find() || !pkMatcher.group(1).equals(signerPubKeyHex)) return;
+            if(!pkMatcher.find()) return;
+            String eventPubkey = pkMatcher.group(1);
+
+            // For bunker:// flow, verify it's from the expected signer
+            // For nostrconnect flow, accept from any pubkey (we learn the signer from the first message)
+            if(signerPubKeyHex != null && !eventPubkey.equals(signerPubKeyHex)) return;
 
             // Decrypt content
             Pattern contentPattern = Pattern.compile("\"content\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
@@ -242,8 +282,16 @@ public class Nip46BunkerClient implements AutoCloseable {
             if(!contentMatcher.find()) return;
             String encryptedContent = contentMatcher.group(1).replace("\\\"", "\"").replace("\\\\", "\\");
 
-            byte[] signerPubKey33 = Nip17Sender.pubKeyHexToCompressed(signerPubKeyHex);
-            String rpcResponse = Nip44.decrypt(localPrivKey, signerPubKey33, encryptedContent);
+            byte[] senderPubKey33 = Nip17Sender.pubKeyHexToCompressed(eventPubkey);
+            String rpcResponse = Nip44.decrypt(localPrivKey, senderPubKey33, encryptedContent);
+
+            // For nostrconnect flow: first message from signer establishes the connection
+            if(isNostrConnectFlow && signerPubKeyHex == null) {
+                signerPubKeyHex = eventPubkey;
+                if(!signerConnected.isDone()) {
+                    signerConnected.complete(eventPubkey);
+                }
+            }
 
             // Parse JSON-RPC response
             Pattern idPattern = Pattern.compile("\"id\"\\s*:\\s*\"([^\"]+)\"");
