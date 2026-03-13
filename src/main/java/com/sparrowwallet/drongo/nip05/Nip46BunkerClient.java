@@ -94,20 +94,28 @@ public class Nip46BunkerClient implements AutoCloseable {
 
     /**
      * Create a client for the nostrconnect:// flow.
-     * Call getNostrConnectUri() to get the URI to paste into nsec.app,
-     * then connect() to wait for the signer to connect back.
+     * Generates a random secret that the signer must return to prove connection.
      */
     public static Nip46BunkerClient forNostrConnect(String relayUrl) {
-        return new Nip46BunkerClient(null, relayUrl != null ? relayUrl : DEFAULT_RELAY, null, true);
+        // Generate a random secret for connection validation
+        byte[] secretBytes = new byte[16];
+        new SecureRandom().nextBytes(secretBytes);
+        String connectSecret = Utils.bytesToHex(secretBytes);
+        return new Nip46BunkerClient(null, relayUrl != null ? relayUrl : DEFAULT_RELAY, connectSecret, true);
     }
 
     /**
      * Generate a nostrconnect:// URI for pasting into nsec.app or Amber.
+     * Includes required secret parameter per NIP-46 spec.
      */
     public String getNostrConnectUri() {
-        return "nostrconnect://" + localPubKeyHex + "?relay=" +
+        String uri = "nostrconnect://" + localPubKeyHex + "?relay=" +
                 URLEncoder.encode(relayUrl, StandardCharsets.UTF_8) +
                 "&metadata=" + URLEncoder.encode("{\"name\":\"Sparrow Wallet\",\"description\":\"Silent Payment notifications\"}", StandardCharsets.UTF_8);
+        if(secret != null) {
+            uri += "&secret=" + secret;
+        }
+        return uri;
     }
 
     private Nip46BunkerClient(String signerPubKeyHex, String relayUrl, String secret, boolean isNostrConnectFlow) {
@@ -143,6 +151,8 @@ public class Nip46BunkerClient implements AutoCloseable {
                 .buildAsync(URI.create(relayUrl), new WebSocket.Listener() {
                     @Override
                     public void onOpen(WebSocket ws) {
+                        log.info("NIP-46: WebSocket connected to " + relayUrl);
+                        log.info("NIP-46: subscribing for kind " + KIND_NIP46_REQUEST + " tagged to " + localPubKeyHex.substring(0, 8) + "...");
                         ws.sendText(subMessage, true);
                         connected.complete(null);
                         ws.request(1);
@@ -152,7 +162,17 @@ public class Nip46BunkerClient implements AutoCloseable {
                     public CompletionStage<?> onText(WebSocket ws, CharSequence data, boolean last) {
                         messageBuffer.append(data);
                         if(last) {
-                            handleMessage(messageBuffer.toString());
+                            String msg = messageBuffer.toString();
+                            if(msg.startsWith("[\"EVENT\"")) {
+                                log.info("NIP-46: relay event received (" + msg.length() + " chars)");
+                            } else if(msg.startsWith("[\"OK\"")) {
+                                log.info("NIP-46: relay OK: " + msg.substring(0, Math.min(80, msg.length())));
+                            } else if(msg.startsWith("[\"EOSE\"")) {
+                                log.info("NIP-46: relay EOSE — subscription active");
+                            } else if(msg.startsWith("[\"NOTICE\"")) {
+                                log.warn("NIP-46: relay notice: " + msg);
+                            }
+                            handleMessage(msg);
                             messageBuffer.setLength(0);
                         }
                         ws.request(1);
@@ -175,11 +195,12 @@ public class Nip46BunkerClient implements AutoCloseable {
 
         if(isNostrConnectFlow) {
             // nostrconnect flow: wait for signer to connect to us
-            log.info("Waiting for signer to connect via nostrconnect (relay: " + relayUrl + ")...");
+            log.info("NIP-46: waiting for signer to connect via nostrconnect (relay: " + relayUrl + ", timeout: " + CONNECT_TIMEOUT.toSeconds() + "s)...");
+            log.info("NIP-46: nostrconnect URI has secret: " + (secret != null));
             try {
                 String signerPubKey = signerConnected.get(CONNECT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
                 this.signerPubKeyHex = signerPubKey;
-                log.info("Signer connected: " + signerPubKey.substring(0, 8) + "...");
+                log.info("NIP-46: signer connected successfully: " + signerPubKey.substring(0, 8) + "...");
             } catch(TimeoutException e) {
                 throw new Exception("Timed out waiting for signer — did you paste the nostrconnect URI into your bunker app?");
             }
@@ -271,36 +292,58 @@ public class Nip46BunkerClient implements AutoCloseable {
             Matcher pkMatcher = pubkeyPattern.matcher(eventJson);
             if(!pkMatcher.find()) return;
             String eventPubkey = pkMatcher.group(1);
+            log.info("NIP-46: received event from " + eventPubkey.substring(0, 8) + "...");
 
             // For bunker:// flow, verify it's from the expected signer
-            // For nostrconnect flow, accept from any pubkey (we learn the signer from the first message)
-            if(signerPubKeyHex != null && !eventPubkey.equals(signerPubKeyHex)) return;
-
-            // Decrypt content
-            Pattern contentPattern = Pattern.compile("\"content\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
-            Matcher contentMatcher = contentPattern.matcher(eventJson);
-            if(!contentMatcher.find()) return;
-            String encryptedContent = contentMatcher.group(1).replace("\\\"", "\"").replace("\\\\", "\\");
-
-            byte[] senderPubKey33 = Nip17Sender.pubKeyHexToCompressed(eventPubkey);
-            String rpcResponse = Nip44.decrypt(localPrivKey, senderPubKey33, encryptedContent);
-
-            // For nostrconnect flow: first message from signer establishes the connection
-            if(isNostrConnectFlow && signerPubKeyHex == null) {
-                signerPubKeyHex = eventPubkey;
-                if(!signerConnected.isDone()) {
-                    signerConnected.complete(eventPubkey);
-                }
+            if(!isNostrConnectFlow && signerPubKeyHex != null && !eventPubkey.equals(signerPubKeyHex)) {
+                log.debug("NIP-46: ignoring event from unexpected pubkey");
+                return;
             }
 
-            // Parse JSON-RPC response
+            // Extract and unescape content
+            String encryptedContent = extractContentFromEvent(eventJson);
+            if(encryptedContent == null) {
+                log.warn("NIP-46: could not extract content from event");
+                return;
+            }
+            log.info("NIP-46: decrypting content (" + encryptedContent.length() + " chars)");
+
+            // Decrypt content
+            byte[] senderPubKey33 = Nip17Sender.pubKeyHexToCompressed(eventPubkey);
+            String rpcResponse;
+            try {
+                rpcResponse = Nip44.decrypt(localPrivKey, senderPubKey33, encryptedContent);
+            } catch(Exception decryptEx) {
+                log.error("NIP-46: decryption failed: " + decryptEx.getMessage());
+                // For nostrconnect flow, still record the signer even if decrypt fails
+                if(isNostrConnectFlow && !signerConnected.isDone()) {
+                    log.info("NIP-46: signer detected despite decrypt failure: " + eventPubkey.substring(0, 8) + "...");
+                }
+                return;
+            }
+            log.info("NIP-46: decrypted response: " + rpcResponse.substring(0, Math.min(100, rpcResponse.length())) + "...");
+
+            // For nostrconnect flow: any successfully decrypted message means signer connected
+            if(isNostrConnectFlow && !signerConnected.isDone()) {
+                signerPubKeyHex = eventPubkey;
+                signerConnected.complete(eventPubkey);
+                log.info("NIP-46: signer connected: " + eventPubkey.substring(0, 8) + "...");
+            }
+
+            // Parse JSON-RPC response — extract id
             Pattern idPattern = Pattern.compile("\"id\"\\s*:\\s*\"([^\"]+)\"");
             Matcher idMatcher = idPattern.matcher(rpcResponse);
-            if(!idMatcher.find()) return;
+            if(!idMatcher.find()) {
+                log.debug("NIP-46: no id in response, ignoring for request matching");
+                return;
+            }
             String responseId = idMatcher.group(1);
 
             CompletableFuture<String> future = pendingRequests.remove(responseId);
-            if(future == null) return;
+            if(future == null) {
+                log.debug("NIP-46: no pending request for id " + responseId);
+                return;
+            }
 
             // Check for error
             if(rpcResponse.contains("\"error\"")) {
@@ -321,8 +364,47 @@ public class Nip46BunkerClient implements AutoCloseable {
                 future.complete(rpcResponse);
             }
         } catch(Exception e) {
-            log.debug("Error handling bunker response: " + e.getMessage());
+            log.error("NIP-46: error handling message: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Extract and unescape the content field from a Nostr event JSON.
+     * Uses character-by-character parsing instead of regex to handle all escape sequences.
+     */
+    private String extractContentFromEvent(String json) {
+        int idx = json.indexOf("\"content\"");
+        if(idx < 0) return null;
+        int colonIdx = json.indexOf(':', idx + 9);
+        if(colonIdx < 0) return null;
+        int start = colonIdx + 1;
+        while(start < json.length() && json.charAt(start) == ' ') start++;
+        if(start >= json.length() || json.charAt(start) != '"') return null;
+
+        StringBuilder content = new StringBuilder();
+        boolean escaped = false;
+        for(int i = start + 1; i < json.length(); i++) {
+            char c = json.charAt(i);
+            if(escaped) {
+                switch(c) {
+                    case '"': content.append('"'); break;
+                    case '\\': content.append('\\'); break;
+                    case 'n': content.append('\n'); break;
+                    case 'r': content.append('\r'); break;
+                    case 't': content.append('\t'); break;
+                    case '/': content.append('/'); break;
+                    default: content.append('\\'); content.append(c);
+                }
+                escaped = false;
+            } else if(c == '\\') {
+                escaped = true;
+            } else if(c == '"') {
+                return content.toString();
+            } else {
+                content.append(c);
+            }
+        }
+        return null;
     }
 
     private String extractEventObject(String message, int start) {
