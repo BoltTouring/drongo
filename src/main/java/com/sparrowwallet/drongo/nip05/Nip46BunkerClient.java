@@ -37,7 +37,7 @@ public class Nip46BunkerClient implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(Nip46BunkerClient.class);
 
     private static final int KIND_NIP46_REQUEST = 24133;
-    private static final Duration TIMEOUT = Duration.ofSeconds(30);
+    private static final Duration TIMEOUT = Duration.ofSeconds(45);
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(90);
     private static final String DEFAULT_RELAY = "wss://relay.nsec.app";
 
@@ -140,17 +140,27 @@ public class Nip46BunkerClient implements AutoCloseable {
     /**
      * Start listening on the relay for incoming events.
      * Call this early (before showing the URI to the user) to avoid missing the signer's response.
+     * Retries up to 3 times with increasing delays.
      */
     public void startListening() {
         if(webSocket != null) return; // Already listening
 
         Thread.ofVirtual().start(() -> {
-            try {
-                openWebSocket();
-                log.info("NIP-46: pre-connected and listening on " + relayUrl);
-            } catch(Exception e) {
-                log.error("NIP-46: failed to pre-connect: " + e.getMessage());
+            for(int attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    log.info("NIP-46: connecting to " + relayUrl + " (attempt " + attempt + "/3)...");
+                    openWebSocket();
+                    log.info("NIP-46: pre-connected and listening on " + relayUrl);
+                    return; // Success
+                } catch(Exception e) {
+                    log.error("NIP-46: connect attempt " + attempt + " failed: " + e.getMessage());
+                    webSocket = null; // Reset for retry
+                    if(attempt < 3) {
+                        try { Thread.sleep(2000L * attempt); } catch(InterruptedException ie) { return; }
+                    }
+                }
             }
+            log.error("NIP-46: all connection attempts failed for " + relayUrl);
         });
     }
 
