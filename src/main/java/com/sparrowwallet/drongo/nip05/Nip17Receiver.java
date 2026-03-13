@@ -105,7 +105,6 @@ public class Nip17Receiver {
                 } catch(Exception e) {
                     log.debug("NIP-17 Receiver: failed to poll " + relay + ": " + e.getMessage());
                 }
-                }
             }));
         }
 
