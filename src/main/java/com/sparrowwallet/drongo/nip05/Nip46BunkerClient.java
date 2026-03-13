@@ -37,7 +37,7 @@ public class Nip46BunkerClient implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(Nip46BunkerClient.class);
 
     private static final int KIND_NIP46_REQUEST = 24133;
-    private static final Duration TIMEOUT = Duration.ofSeconds(15);
+    private static final Duration TIMEOUT = Duration.ofSeconds(30);
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(90);
     private static final String DEFAULT_RELAY = "wss://relay.nsec.app";
 
@@ -111,7 +111,8 @@ public class Nip46BunkerClient implements AutoCloseable {
     public String getNostrConnectUri() {
         String uri = "nostrconnect://" + localPubKeyHex + "?relay=" +
                 URLEncoder.encode(relayUrl, StandardCharsets.UTF_8) +
-                "&metadata=" + URLEncoder.encode("{\"name\":\"Sparrow Wallet\",\"description\":\"Silent Payment notifications\"}", StandardCharsets.UTF_8);
+                "&metadata=" + URLEncoder.encode("{\"name\":\"Sparrow Wallet\",\"description\":\"Silent Payment notifications\",\"url\":\"https://sparrowwallet.com\"}", StandardCharsets.UTF_8) +
+                "&perms=nip44_decrypt,nip44_encrypt,get_public_key";
         if(secret != null) {
             uri += "&secret=" + secret;
         }
@@ -137,11 +138,28 @@ public class Nip46BunkerClient implements AutoCloseable {
     }
 
     /**
-     * Connect to the bunker relay and subscribe for responses.
+     * Start listening on the relay for incoming events.
+     * Call this early (before showing the URI to the user) to avoid missing the signer's response.
      */
-    public void connect() throws Exception {
+    public void startListening() {
+        if(webSocket != null) return; // Already listening
+
+        Thread.ofVirtual().start(() -> {
+            try {
+                openWebSocket();
+                log.info("NIP-46: pre-connected and listening on " + relayUrl);
+            } catch(Exception e) {
+                log.error("NIP-46: failed to pre-connect: " + e.getMessage());
+            }
+        });
+    }
+
+    private void openWebSocket() throws Exception {
+        if(webSocket != null) return;
+
         String subscriptionId = UUID.randomUUID().toString().substring(0, 8);
-        String subMessage = "[\"REQ\",\"" + subscriptionId + "\",{\"kinds\":[" + KIND_NIP46_REQUEST + "],\"#p\":[\"" + localPubKeyHex + "\"],\"limit\":0}]";
+        long since = (System.currentTimeMillis() / 1000) - 120; // Catch events from last 2 minutes
+        String subMessage = "[\"REQ\",\"" + subscriptionId + "\",{\"kinds\":[" + KIND_NIP46_REQUEST + "],\"#p\":[\"" + localPubKeyHex + "\"],\"since\":" + since + "}]";
 
         CompletableFuture<Void> connected = new CompletableFuture<>();
 
@@ -181,17 +199,26 @@ public class Nip46BunkerClient implements AutoCloseable {
 
                     @Override
                     public CompletionStage<?> onClose(WebSocket ws, int code, String reason) {
+                        log.info("NIP-46: WebSocket closed: " + reason);
                         pendingRequests.values().forEach(f -> f.completeExceptionally(new Exception("Connection closed")));
                         return null;
                     }
 
                     @Override
                     public void onError(WebSocket ws, Throwable error) {
+                        log.error("NIP-46: WebSocket error: " + error.getMessage());
                         pendingRequests.values().forEach(f -> f.completeExceptionally(error));
                     }
                 }).join();
 
         connected.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * Connect to the bunker relay and establish a session with the signer.
+     */
+    public void connect() throws Exception {
+        openWebSocket();
 
         if(isNostrConnectFlow) {
             // nostrconnect flow: wait for signer to connect to us
@@ -441,6 +468,26 @@ public class Nip46BunkerClient implements AutoCloseable {
 
     public String getSignerPubKeyHex() {
         return signerPubKeyHex;
+    }
+
+    public boolean isSignerConnected() {
+        return signerConnected.isDone();
+    }
+
+    /**
+     * Wait for the signer to connect (for nostrconnect flow).
+     * Call startListening() first, then show the URI, then this.
+     */
+    public void waitForSigner() throws Exception {
+        if(signerConnected.isDone()) return;
+        log.info("NIP-46: waiting for signer (timeout: " + CONNECT_TIMEOUT.toSeconds() + "s)...");
+        try {
+            String signerPubKey = signerConnected.get(CONNECT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            this.signerPubKeyHex = signerPubKey;
+            log.info("NIP-46: signer connected: " + signerPubKey.substring(0, 8) + "...");
+        } catch(TimeoutException e) {
+            throw new Exception("Timed out waiting for signer — did you paste the nostrconnect URI into your bunker app?");
+        }
     }
 
     private static String escapeJson(String s) {
