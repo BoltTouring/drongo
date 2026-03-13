@@ -39,7 +39,7 @@ public class Nip46BunkerClient implements AutoCloseable {
     private static final int KIND_NIP46_REQUEST = 24133;
     private static final Duration TIMEOUT = Duration.ofSeconds(45);
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(90);
-    private static final String DEFAULT_RELAY = "wss://relay.nsec.app";
+    private static final String DEFAULT_RELAY = "wss://relay.damus.io";
 
     private String signerPubKeyHex; // null until signer connects (nostrconnect flow)
     private final String relayUrl;
