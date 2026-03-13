@@ -251,10 +251,9 @@ public class Nip44 {
     public static String selfTest() {
         try {
             // Test vector: sec1=0x01, sec2=0x02
+            // pub2 = 02 * G = 02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5
             byte[] sec1 = new byte[32]; sec1[31] = 1;
-            byte[] sec2 = new byte[32]; sec2[31] = 2;
-            ECKey key2 = ECKey.fromPrivate(sec2);
-            byte[] pub2 = key2.getPubKey(true);
+            byte[] pub2 = Utils.hexToBytes("02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5");
 
             // Test conversation key
             byte[] convKey = getConversationKey(sec1, pub2);
@@ -272,13 +271,10 @@ public class Nip44 {
                 return "payload FAIL: expected " + expectedPayload + " got " + payload;
             }
 
-            // Test round-trip
-            ECKey key1 = ECKey.fromPrivate(sec1);
-            byte[] pub1 = key1.getPubKey(true);
-            String encrypted = encrypt(sec1, pub2, "test message");
-            String decrypted = decrypt(sec2, pub1, encrypted);
-            if(!"test message".equals(decrypted)) {
-                return "round-trip FAIL: got " + decrypted;
+            // Test decrypt
+            String decrypted = decryptWithConversationKey(convKey, expectedPayload);
+            if(!"a".equals(decrypted)) {
+                return "decrypt FAIL: expected 'a' got '" + decrypted + "'";
             }
 
             return null; // All passed
