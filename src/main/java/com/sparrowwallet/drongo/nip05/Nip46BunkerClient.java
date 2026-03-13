@@ -176,7 +176,6 @@ public class Nip46BunkerClient implements AutoCloseable {
         HttpClient client = HttpClient.newBuilder().connectTimeout(TIMEOUT).build();
         webSocket = client.newWebSocketBuilder()
                 .connectTimeout(TIMEOUT)
-                .subprotocols("nostr")
                 .buildAsync(URI.create(relayUrl), new WebSocket.Listener() {
                     @Override
                     public void onOpen(WebSocket ws) {
@@ -228,6 +227,10 @@ public class Nip46BunkerClient implements AutoCloseable {
                 }).join();
 
         connected.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+
+        // Brief delay to let relay process our subscription
+        try { Thread.sleep(1000); } catch(InterruptedException ignored) {}
+        log.info("NIP-46: WebSocket open and subscription sent, proceeding...");
     }
 
     /**
@@ -249,11 +252,14 @@ public class Nip46BunkerClient implements AutoCloseable {
             }
         } else {
             // bunker:// flow: send connect request to signer
+            log.info("NIP-46: bunker:// flow — sending connect request to " + signerPubKeyHex.substring(0, 8) + "...");
             String connectParams;
             if(secret != null) {
                 connectParams = "[\"" + signerPubKeyHex + "\",\"" + secret + "\"]";
+                log.info("NIP-46: connect params include secret");
             } else {
                 connectParams = "[\"" + signerPubKeyHex + "\"]";
+                log.info("NIP-46: connect params without secret");
             }
             sendRequest("connect", connectParams, CONNECT_TIMEOUT);
             log.info("Connected to bunker at " + relayUrl + " (signer: " + signerPubKeyHex.substring(0, 8) + "...)");
@@ -287,12 +293,15 @@ public class Nip46BunkerClient implements AutoCloseable {
     }
 
     private String sendRequest(String method, String paramsJson, Duration timeout) throws Exception {
+        log.info("NIP-46: sendRequest method=" + method + " to signer " + (signerPubKeyHex != null ? signerPubKeyHex.substring(0, 8) + "..." : "null"));
         String requestId = UUID.randomUUID().toString();
         String rpcJson = "{\"id\":\"" + requestId + "\",\"method\":\"" + method + "\",\"params\":" + paramsJson + "}";
+        log.info("NIP-46: RPC payload: " + rpcJson.substring(0, Math.min(100, rpcJson.length())));
 
         // Encrypt request to signer with NIP-44
         byte[] signerPubKey33 = Nip17Sender.pubKeyHexToCompressed(signerPubKeyHex);
         String encrypted = Nip44.encrypt(localPrivKey, signerPubKey33, rpcJson);
+        log.info("NIP-46: encrypted content length: " + encrypted.length());
 
         // Build and sign the event
         long createdAt = System.currentTimeMillis() / 1000;
@@ -311,7 +320,10 @@ public class Nip46BunkerClient implements AutoCloseable {
         CompletableFuture<String> responseFuture = new CompletableFuture<>();
         pendingRequests.put(requestId, responseFuture);
 
-        webSocket.sendText("[\"EVENT\"," + eventJson + "]", true);
+        String eventMessage = "[\"EVENT\"," + eventJson + "]";
+        log.info("NIP-46: publishing event (" + eventMessage.length() + " chars) with id " + id.substring(0, 8) + "...");
+        webSocket.sendText(eventMessage, true);
+        log.info("NIP-46: event sent, waiting for response (timeout: " + timeout.toSeconds() + "s)...");
 
         try {
             return responseFuture.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
