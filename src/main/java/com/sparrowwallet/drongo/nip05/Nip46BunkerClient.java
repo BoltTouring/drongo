@@ -316,16 +316,17 @@ public class Nip46BunkerClient implements AutoCloseable {
      */
     private void handleAuth(WebSocket ws, String authMessage) {
         try {
-            // Extract challenge string from ["AUTH", "<challenge>"]
-            int firstQuote = authMessage.indexOf('"', authMessage.indexOf("AUTH") + 4);
-            int secondQuote = authMessage.indexOf('"', firstQuote + 1);
-            int thirdQuote = authMessage.indexOf('"', secondQuote + 1);
-            int fourthQuote = authMessage.indexOf('"', thirdQuote + 1);
-            if(thirdQuote < 0 || fourthQuote < 0) {
-                log.warn("NIP-46: could not parse AUTH challenge");
-                return;
+            // Extract challenge from ["AUTH","<challenge>"]
+            // Find 3rd and 4th quotes in the message
+            int q = -1;
+            for(int i = 0; i < 3; i++) {
+                q = authMessage.indexOf('"', q + 1);
+                if(q < 0) { log.warn("NIP-46: malformed AUTH (quote " + i + ")"); return; }
             }
-            String challenge = authMessage.substring(thirdQuote + 1, fourthQuote);
+            int challengeStart = q + 1;
+            int challengeEnd = authMessage.indexOf('"', challengeStart);
+            if(challengeEnd < 0) { log.warn("NIP-46: malformed AUTH (no closing quote)"); return; }
+            String challenge = authMessage.substring(challengeStart, challengeEnd);
             log.info("NIP-46: AUTH challenge: " + challenge);
 
             // Build kind 22242 AUTH event

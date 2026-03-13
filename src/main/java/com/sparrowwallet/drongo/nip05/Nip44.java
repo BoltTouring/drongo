@@ -244,4 +244,46 @@ public class Nip44 {
         System.arraycopy(bytes, 0, padded, 32 - bytes.length, bytes.length);
         return padded;
     }
+
+    /**
+     * Run NIP-44 against official test vector. Returns null on success, error message on failure.
+     */
+    public static String selfTest() {
+        try {
+            // Test vector: sec1=0x01, sec2=0x02
+            byte[] sec1 = new byte[32]; sec1[31] = 1;
+            byte[] sec2 = new byte[32]; sec2[31] = 2;
+            ECKey key2 = ECKey.fromPrivate(sec2);
+            byte[] pub2 = key2.getPubKey(true);
+
+            // Test conversation key
+            byte[] convKey = getConversationKey(sec1, pub2);
+            String convKeyHex = Utils.bytesToHex(convKey);
+            String expectedConvKey = "c41c775356fd92eadc63ff5a0dc1da211b268cbea22316767095b2871ea1412d";
+            if(!expectedConvKey.equals(convKeyHex)) {
+                return "conversation_key FAIL: expected " + expectedConvKey + " got " + convKeyHex;
+            }
+
+            // Test full payload with known nonce
+            byte[] nonce = new byte[32]; nonce[31] = 1;
+            String payload = encryptWithConversationKey(convKey, nonce, "a");
+            String expectedPayload = "AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABee0G5VSK0/9YypIObAtDKfYEAjD35uVkHyB0F4DwrcNaCXlCWZKaArsGrY6M9wnuTMxWfp1RTN9Xga8no+kF5Vsb";
+            if(!expectedPayload.equals(payload)) {
+                return "payload FAIL: expected " + expectedPayload + " got " + payload;
+            }
+
+            // Test round-trip
+            ECKey key1 = ECKey.fromPrivate(sec1);
+            byte[] pub1 = key1.getPubKey(true);
+            String encrypted = encrypt(sec1, pub2, "test message");
+            String decrypted = decrypt(sec2, pub1, encrypted);
+            if(!"test message".equals(decrypted)) {
+                return "round-trip FAIL: got " + decrypted;
+            }
+
+            return null; // All passed
+        } catch(Exception e) {
+            return "EXCEPTION: " + e.getClass().getSimpleName() + ": " + e.getMessage();
+        }
+    }
 }
