@@ -184,11 +184,16 @@ public class Nip46BunkerClient implements AutoCloseable {
                             if(msg.startsWith("[\"EVENT\"")) {
                                 log.info("NIP-46: relay event received (" + msg.length() + " chars)");
                             } else if(msg.startsWith("[\"OK\"")) {
-                                log.info("NIP-46: relay OK: " + msg.substring(0, Math.min(80, msg.length())));
+                                log.info("NIP-46: relay OK: " + msg.substring(0, Math.min(120, msg.length())));
                             } else if(msg.startsWith("[\"EOSE\"")) {
                                 log.info("NIP-46: relay EOSE — subscription active");
                             } else if(msg.startsWith("[\"NOTICE\"")) {
                                 log.warn("NIP-46: relay notice: " + msg);
+                            } else if(msg.startsWith("[\"AUTH\"")) {
+                                log.info("NIP-46: relay AUTH challenge received");
+                                handleAuth(ws, msg);
+                            } else {
+                                log.info("NIP-46: relay message: " + msg.substring(0, Math.min(120, msg.length())));
                             }
                             handleMessage(msg);
                             messageBuffer.setLength(0);
@@ -302,6 +307,53 @@ public class Nip46BunkerClient implements AutoCloseable {
         } catch(TimeoutException e) {
             pendingRequests.remove(requestId);
             throw new Exception("Bunker request timed out: " + method + " (waited " + timeout.toSeconds() + "s — did you approve in your bunker app?)");
+        }
+    }
+
+    /**
+     * Handle NIP-42 AUTH challenge from relay.
+     * Signs a kind 22242 event with the challenge and relay URL, sends it back.
+     */
+    private void handleAuth(WebSocket ws, String authMessage) {
+        try {
+            // Extract challenge string from ["AUTH", "<challenge>"]
+            int firstQuote = authMessage.indexOf('"', authMessage.indexOf("AUTH") + 4);
+            int secondQuote = authMessage.indexOf('"', firstQuote + 1);
+            int thirdQuote = authMessage.indexOf('"', secondQuote + 1);
+            int fourthQuote = authMessage.indexOf('"', thirdQuote + 1);
+            if(thirdQuote < 0 || fourthQuote < 0) {
+                log.warn("NIP-46: could not parse AUTH challenge");
+                return;
+            }
+            String challenge = authMessage.substring(thirdQuote + 1, fourthQuote);
+            log.info("NIP-46: AUTH challenge: " + challenge);
+
+            // Build kind 22242 AUTH event
+            long createdAt = System.currentTimeMillis() / 1000;
+            String tags = "[[\"relay\",\"" + escapeJson(relayUrl) + "\"],[\"challenge\",\"" + escapeJson(challenge) + "\"]]";
+            String serialized = "[0,\"" + localPubKeyHex + "\"," + createdAt + ",22242," + tags + ",\"\"]";
+
+            byte[] hash = Sha256Hash.hash(serialized.getBytes(StandardCharsets.UTF_8));
+            String id = Utils.bytesToHex(hash);
+            ECKey key = ECKey.fromPrivate(localPrivKey);
+            SchnorrSignature sig = key.signSchnorr(Sha256Hash.wrap(hash));
+            String sigHex = Utils.bytesToHex(sig.encode());
+
+            String authEvent = "{\"id\":\"" + id + "\",\"pubkey\":\"" + localPubKeyHex +
+                    "\",\"created_at\":" + createdAt + ",\"kind\":22242,\"tags\":" + tags +
+                    ",\"content\":\"\",\"sig\":\"" + sigHex + "\"}";
+
+            ws.sendText("[\"AUTH\"," + authEvent + "]", true);
+            log.info("NIP-46: AUTH response sent");
+
+            // Re-send subscription after AUTH (relay may have ignored it before auth)
+            String subscriptionId = UUID.randomUUID().toString().substring(0, 8);
+            long since = (System.currentTimeMillis() / 1000) - 120;
+            String subMessage = "[\"REQ\",\"" + subscriptionId + "\",{\"kinds\":[" + KIND_NIP46_REQUEST + "],\"#p\":[\"" + localPubKeyHex + "\"],\"since\":" + since + "}]";
+            ws.sendText(subMessage, true);
+            log.info("NIP-46: re-subscribed after AUTH");
+        } catch(Exception e) {
+            log.error("NIP-46: AUTH handling failed: " + e.getMessage(), e);
         }
     }
 
