@@ -182,10 +182,13 @@ public class Nip17Sender {
                     public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
                         String response = data.toString();
                         if(response.startsWith("[\"OK\"")) {
-                            result.complete(true);
+                            log.info("NIP-17 Sender: relay response from " + relayUrl + ": " + response.substring(0, Math.min(150, response.length())));
+                            result.complete(response.contains("true"));
                         } else if(response.startsWith("[\"NOTICE\"")) {
-                            log.warn("Relay notice from " + relayUrl + ": " + response);
+                            log.warn("NIP-17 Sender: relay notice from " + relayUrl + ": " + response);
                             result.complete(false);
+                        } else {
+                            log.info("NIP-17 Sender: relay says: " + response.substring(0, Math.min(100, response.length())));
                         }
                         webSocket.request(1);
                         return null;
