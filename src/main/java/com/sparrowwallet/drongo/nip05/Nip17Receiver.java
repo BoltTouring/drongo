@@ -82,22 +82,29 @@ public class Nip17Receiver {
         Set<String> seenEvents = ConcurrentHashMap.newKeySet();
         List<SilentPaymentNotification> notifications = Collections.synchronizedList(new ArrayList<>());
 
+        log.info("NIP-17 Receiver: polling " + targetRelays.size() + " relays for pubkey " + recipientPubKeyHex.substring(0, 8) + "... (since " + since + ")");
+
         List<CompletableFuture<Void>> futures = new ArrayList<>();
         for(String relay : targetRelays) {
             futures.add(CompletableFuture.runAsync(() -> {
                 try {
                     List<String> events = queryGiftWraps(relay, since);
+                    log.info("NIP-17 Receiver: " + relay + " returned " + events.size() + " gift wrap(s)");
                     for(String eventJson : events) {
                         String eventId = extractField(eventJson, "id");
                         if(eventId != null && seenEvents.add(eventId)) {
                             SilentPaymentNotification notif = decryptGiftWrap(eventJson);
                             if(notif != null) {
                                 notifications.add(notif);
+                                log.info("NIP-17 Receiver: decoded SP notification: " + notif.amount() + " sats, txid " + notif.txid().substring(0, 8) + "...");
+                            } else {
+                                log.info("NIP-17 Receiver: gift wrap decrypted but not an SP notification");
                             }
                         }
                     }
                 } catch(Exception e) {
-                    log.debug("Failed to poll " + relay + ": " + e.getMessage());
+                    log.debug("NIP-17 Receiver: failed to poll " + relay + ": " + e.getMessage());
+                }
                 }
             }));
         }
@@ -106,7 +113,7 @@ public class Nip17Receiver {
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
                     .get(RELAY_TIMEOUT.toMillis() * 2, TimeUnit.MILLISECONDS);
         } catch(Exception e) {
-            log.debug("Some relays timed out during notification poll");
+            log.info("NIP-17 Receiver: some relays timed out during notification poll");
         }
 
         return notifications;
@@ -150,7 +157,7 @@ public class Nip17Receiver {
             // Parse as SP notification
             return SilentPaymentNotification.fromJson(rumorContent);
         } catch(Exception e) {
-            log.debug("Failed to decrypt gift wrap: " + e.getMessage());
+            log.info("NIP-17 Receiver: failed to decrypt gift wrap: " + e.getMessage());
             return null;
         }
     }
@@ -169,6 +176,7 @@ public class Nip17Receiver {
 
         String reqMessage = "[\"REQ\",\"" + subscriptionId + "\"," + filter + "]";
         String closeMessage = "[\"CLOSE\",\"" + subscriptionId + "\"]";
+        log.info("NIP-17 Receiver: querying " + relayUrl + " for kind " + KIND_GIFT_WRAP + " #p=" + recipientPubKeyHex.substring(0, 8) + "...");
 
         List<String> events = Collections.synchronizedList(new ArrayList<>());
         CompletableFuture<List<String>> resultFuture = new CompletableFuture<>();
@@ -181,6 +189,7 @@ public class Nip17Receiver {
                 .buildAsync(URI.create(relayUrl), new WebSocket.Listener() {
                     @Override
                     public void onOpen(WebSocket webSocket) {
+                        log.info("NIP-17 Receiver: connected to " + relayUrl + ", sending REQ");
                         webSocket.sendText(reqMessage, true);
                         webSocket.request(1);
                     }
@@ -192,12 +201,16 @@ public class Nip17Receiver {
                             String message = messageBuffer.toString();
                             messageBuffer.setLength(0);
                             if(message.startsWith("[\"EVENT\"")) {
+                                log.info("NIP-17 Receiver: got EVENT from " + relayUrl);
                                 String eventObj = extractEventObject(message);
                                 if(eventObj != null) {
                                     events.add(eventObj);
                                 }
                             } else if(message.startsWith("[\"EOSE\"")) {
+                                log.info("NIP-17 Receiver: EOSE from " + relayUrl + " — " + events.size() + " event(s)");
                                 resultFuture.complete(events);
+                            } else {
+                                log.info("NIP-17 Receiver: " + relayUrl + " says: " + message.substring(0, Math.min(80, message.length())));
                             }
                         }
                         webSocket.request(1);
