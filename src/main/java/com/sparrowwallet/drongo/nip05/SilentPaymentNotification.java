@@ -20,6 +20,35 @@ public record SilentPaymentNotification(String txid, int vout, long amount) {
     private static final String VERSION = "1";
 
     /**
+     * Verification status for UI display.
+     */
+    public enum VerificationStatus {
+        UNVERIFIED, VERIFYING, VERIFIED, FAILED
+    }
+
+    /**
+     * Mutable wrapper for UI — holds immutable notification + verification state.
+     */
+    public static class Verifiable {
+        private final SilentPaymentNotification notification;
+        private VerificationStatus status = VerificationStatus.UNVERIFIED;
+        private String error;
+
+        public Verifiable(SilentPaymentNotification notification) {
+            this.notification = notification;
+        }
+
+        public String txid() { return notification.txid(); }
+        public int vout() { return notification.vout(); }
+        public long amount() { return notification.amount(); }
+        public SilentPaymentNotification notification() { return notification; }
+        public VerificationStatus verificationStatus() { return status; }
+        public String error() { return error; }
+        public void setStatus(VerificationStatus status) { this.status = status; }
+        public void setError(String error) { this.error = error; }
+    }
+
+    /**
      * Serialize to JSON for inclusion in a NIP-17 DM.
      */
     public String toJson() {
