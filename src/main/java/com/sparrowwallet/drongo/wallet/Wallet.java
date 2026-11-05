@@ -13,9 +13,11 @@ import com.sparrowwallet.drongo.protocol.*;
 import com.sparrowwallet.drongo.psbt.PSBT;
 import com.sparrowwallet.drongo.psbt.PSBTInput;
 import com.sparrowwallet.drongo.psbt.PSBTOutput;
+import com.sparrowwallet.drongo.psbt.PSBTProofException;
 import com.sparrowwallet.drongo.silentpayments.*;
 
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.util.*;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -28,6 +30,8 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     public static final int SEARCH_LOOKAHEAD = 4000;
     public static final String ALLOW_DERIVATIONS_MATCHING_OTHER_SCRIPT_TYPES_PROPERTY = "com.sparrowwallet.allowDerivationsMatchingOtherScriptTypes";
     public static final String ALLOW_DERIVATIONS_MATCHING_OTHER_NETWORKS_PROPERTY = "com.sparrowwallet.allowDerivationsMatchingOtherNetworks";
+
+    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
     private String name;
     private String label;
@@ -50,6 +54,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     private Integer gapLimit;
     private Integer watchLast;
     private Date birthDate;
+    private Integer birthHeight;
 
     public Wallet() {
     }
@@ -125,6 +130,8 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
         childWallet.purposeNodes.clear();
         childWallet.transactions.clear();
         childWallet.detachedLabels.clear();
+        childWallet.silentPaymentAddresses.clear();
+        childWallet.walletTables.clear();
         childWallet.childWallets.clear();
         childWallet.storedBlockHeight = null;
         childWallet.gapLimit = standardAccount.getMinimumGapLimit();
@@ -146,15 +153,17 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
 
             if(keystore.hasMasterPrivateKey()) {
                 try {
-                    Keystore derivedKeystore = keystore.hasSeed() ? Keystore.fromSeed(keystore.getSeed(), childDerivation) : Keystore.fromMasterPrivateExtendedKey(keystore.getMasterPrivateExtendedKey(), childDerivation);
+                    Keystore derivedKeystore = keystore.hasSeed() ? Keystore.fromSeed(keystore.getSeed(), childWallet.getPolicyType(), childDerivation) : Keystore.fromMasterPrivateExtendedKey(keystore.getMasterPrivateExtendedKey(), childWallet.getPolicyType(), childDerivation);
                     keystore.setKeyDerivation(derivedKeystore.getKeyDerivation());
                     keystore.setExtendedPublicKey(derivedKeystore.getExtendedPublicKey());
+                    keystore.setSilentPaymentScanAddress(derivedKeystore.getSilentPaymentScanAddress());
                 } catch(Exception e) {
                     throw new IllegalStateException("Cannot derive keystore for " + standardAccount + " account", e);
                 }
             } else {
                 keystore.setKeyDerivation(new KeyDerivation(null, KeyDerivation.writePath(childDerivation)));
                 keystore.setExtendedPublicKey(null);
+                keystore.setSilentPaymentScanAddress(null);
             }
         }
 
@@ -187,7 +196,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     }
 
     public Wallet addChildWallet(PaymentCode externalPaymentCode, ScriptType childScriptType, String label) {
-        if(policyType != PolicyType.SINGLE) {
+        if(policyType != PolicyType.SINGLE_HD) {
             throw new IllegalStateException("Cannot add payment code wallet to " + policyType.getName() + " wallet");
         }
 
@@ -202,7 +211,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
 
         Wallet childWallet = new Wallet(childScriptType + "-" + externalPaymentCode.toString());
         childWallet.setLabel(label);
-        childWallet.setPolicyType(PolicyType.SINGLE);
+        childWallet.setPolicyType(PolicyType.SINGLE_HD);
         childWallet.setScriptType(childScriptType);
         childWallet.setGapLimit(5);
 
@@ -217,7 +226,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
         keystore.setExtendedPublicKey(new ExtendedKey(pubKey, keystore.getBip47ExtendedPrivateKey().getParentFingerprint(), derivation.get(derivation.size() - 1)));
 
         childWallet.getKeystores().add(keystore);
-        childWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, scriptType, childWallet.getKeystores(), 1));
+        childWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, scriptType, childWallet.getKeystores(), 1));
 
         childWallet.setMasterWallet(this);
         getChildWallets().add(childWallet);
@@ -251,7 +260,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     }
 
     public boolean hasPaymentCode() {
-        return getKeystores().size() == 1 && getKeystores().get(0).getBip47ExtendedPrivateKey() != null && policyType == PolicyType.SINGLE
+        return getKeystores().size() == 1 && getKeystores().get(0).getBip47ExtendedPrivateKey() != null && policyType == PolicyType.SINGLE_HD
                 && PaymentCode.SEGWIT_SCRIPT_TYPES.contains(scriptType);
     }
 
@@ -266,7 +275,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     public Wallet getNotificationWallet() {
         if(isMasterWallet() && hasPaymentCode()) {
             Wallet notificationWallet = new Wallet();
-            notificationWallet.setPolicyType(PolicyType.SINGLE);
+            notificationWallet.setPolicyType(PolicyType.SINGLE_HD);
             notificationWallet.setScriptType(ScriptType.P2PKH);
             notificationWallet.setGapLimit(0);
 
@@ -280,7 +289,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
             keystore.setBip47ExtendedPrivateKey(masterKeystore.getBip47ExtendedPrivateKey());
 
             notificationWallet.getKeystores().add(keystore);
-            notificationWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2PKH, notificationWallet.getKeystores(), 1));
+            notificationWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2PKH, notificationWallet.getKeystores(), 1));
 
             return notificationWallet;
         }
@@ -322,7 +331,19 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     }
 
     public boolean canSendSilentPayments() {
-        return getKeystores().size() == 1 && policyType == PolicyType.SINGLE && SilentPayment.VALID_INPUT_SCRIPT_TYPES.contains(scriptType);
+        return getKeystores().size() == 1 && (policyType == PolicyType.SINGLE_HD || policyType == PolicyType.SINGLE_SP) && SilentPayment.VALID_INPUT_SCRIPT_TYPES.contains(scriptType);
+    }
+
+    public boolean hasSilentPaymentScanAddress() {
+        return getKeystores().size() == 1 && policyType == PolicyType.SINGLE_SP && keystores.getFirst().getSilentPaymentScanAddress() != null;
+    }
+
+    public SilentPaymentScanAddress getSilentPaymentScanAddress() {
+        if(hasSilentPaymentScanAddress()) {
+            return getKeystores().getFirst().getSilentPaymentScanAddress();
+        }
+
+        return null;
     }
 
     public StandardAccount getStandardAccountType() {
@@ -482,21 +503,24 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     }
 
     public SilentPaymentAddress getSilentPaymentAddress(Address address) {
-        return silentPaymentAddresses.get(address);
+        return resolveMasterWallet().silentPaymentAddresses.get(address);
     }
 
-    private void addSilentPaymentAddress(Address address, SilentPaymentAddress silentPaymentAddress) {
-        silentPaymentAddresses.put(address, silentPaymentAddress);
+    public void addSilentPaymentAddress(Address address, SilentPaymentAddress silentPaymentAddress) {
+        resolveMasterWallet().silentPaymentAddresses.put(address, silentPaymentAddress);
+    }
+
+    public Map<Address, SilentPaymentAddress> getSilentPaymentAddresses() {
+        return resolveMasterWallet().silentPaymentAddresses;
     }
 
     public void clearSilentPaymentAddress(Address address) {
-        silentPaymentAddresses.remove(address);
+        resolveMasterWallet().silentPaymentAddresses.remove(address);
     }
 
     public boolean isSilentPaymentsTransaction(BlockTransaction blockTransaction) {
-        Wallet wallet = isNested() ? getMasterWallet() : this;
         return blockTransaction.getTransaction().getOutputs().stream().map(output -> output.getScript().getToAddress())
-                .filter(Objects::nonNull).anyMatch(address -> wallet.getSilentPaymentAddress(address) != null);
+                .filter(Objects::nonNull).anyMatch(address -> getSilentPaymentAddress(address) != null);
     }
 
     public boolean isSafeToAddInputsOrOutputs(BlockTransaction blockTransaction) {
@@ -551,7 +575,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     }
 
     public int getGapLimit() {
-        return gapLimit == null ? DEFAULT_LOOKAHEAD : gapLimit;
+        return policyType == PolicyType.SINGLE_SP ? 0 : (gapLimit == null ? DEFAULT_LOOKAHEAD : gapLimit);
     }
 
     public void gapLimit(Integer gapLimit) {
@@ -578,6 +602,28 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
         this.birthDate = birthDate;
     }
 
+    public Integer getBirthHeight() {
+        return birthHeight;
+    }
+
+    public void setBirthHeight(Integer birthHeight) {
+        this.birthHeight = birthHeight;
+    }
+
+    public int getNeededScanStart() {
+        if(storedBlockHeight != null && storedBlockHeight > 0) {
+            return Math.max(0, storedBlockHeight - BlockTransactionHash.BLOCKS_TO_FULLY_CONFIRM);
+        }
+        if(birthHeight != null) {
+            return Math.max(0, birthHeight - BlockTransactionHash.BLOCKS_TO_FULLY_CONFIRM);
+        }
+        if(birthDate != null) {
+            return (int)(birthDate.getTime() / 1000L);
+        }
+
+        return 0;
+    }
+
     public boolean isMasterWallet() {
         return masterWallet == null;
     }
@@ -588,6 +634,10 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
 
     public void setMasterWallet(Wallet masterWallet) {
         this.masterWallet = masterWallet;
+    }
+
+    public Wallet resolveMasterWallet() {
+        return isNested() ? getMasterWallet() : this;
     }
 
     public Wallet getChildWallet(String name) {
@@ -661,10 +711,8 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     }
 
     public ECKey getPubKey(WalletNode node) {
-        if(policyType == PolicyType.MULTI) {
+        if(policyType == PolicyType.MULTI_HD) {
             throw new IllegalStateException("Attempting to retrieve a single key for a multisig policy wallet");
-        } else if(policyType == PolicyType.CUSTOM) {
-            throw new UnsupportedOperationException("Cannot determine a public key for a custom policy");
         }
 
         Keystore keystore = getKeystores().get(0);
@@ -672,20 +720,18 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     }
 
     public List<ECKey> getPubKeys(WalletNode node) {
-        if(policyType == PolicyType.SINGLE) {
+        if(policyType == PolicyType.SINGLE_HD || policyType == PolicyType.SINGLE_SP) {
             throw new IllegalStateException("Attempting to retrieve multiple keys for a singlesig policy wallet");
-        } else if(policyType == PolicyType.CUSTOM) {
-            throw new UnsupportedOperationException("Cannot determine public keys for a custom policy");
         }
 
         return getKeystores().stream().map(keystore -> keystore.getPubKey(node)).collect(Collectors.toList());
     }
 
     public Address getAddress(WalletNode node) {
-        if(policyType == PolicyType.SINGLE) {
+        if(policyType == PolicyType.SINGLE_HD || policyType == PolicyType.SINGLE_SP) {
             ECKey pubKey = node.getPubKey();
-            return scriptType.getAddress(pubKey);
-        } else if(policyType == PolicyType.MULTI) {
+            return scriptType.getAddress(policyType, pubKey);
+        } else if(policyType == PolicyType.MULTI_HD) {
             List<ECKey> pubKeys = node.getPubKeys();
             Script script = ScriptType.MULTISIG.getOutputScript(defaultPolicy.getNumSignaturesRequired(), pubKeys);
             return scriptType.getAddress(script);
@@ -695,10 +741,10 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     }
 
     public Script getOutputScript(WalletNode node) {
-        if(policyType == PolicyType.SINGLE) {
+        if(policyType == PolicyType.SINGLE_HD || policyType == PolicyType.SINGLE_SP) {
             ECKey pubKey = node.getPubKey();
-            return scriptType.getOutputScript(pubKey);
-        } else if(policyType == PolicyType.MULTI) {
+            return scriptType.getOutputScript(policyType, pubKey);
+        } else if(policyType == PolicyType.MULTI_HD) {
             List<ECKey> pubKeys = node.getPubKeys();
             Script script = ScriptType.MULTISIG.getOutputScript(defaultPolicy.getNumSignaturesRequired(), pubKeys);
             return scriptType.getOutputScript(script);
@@ -708,10 +754,10 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     }
 
     public String getOutputDescriptor(WalletNode node) {
-        if(policyType == PolicyType.SINGLE) {
+        if(policyType == PolicyType.SINGLE_HD || policyType == PolicyType.SINGLE_SP) {
             ECKey pubKey = node.getPubKey();
-            return scriptType.getOutputDescriptor(pubKey);
-        } else if(policyType == PolicyType.MULTI) {
+            return scriptType.getOutputDescriptor(policyType, pubKey);
+        } else if(policyType == PolicyType.MULTI_HD) {
             List<ECKey> pubKeys = node.getPubKeys();
             Script script = ScriptType.MULTISIG.getOutputScript(defaultPolicy.getNumSignaturesRequired(), pubKeys);
             return scriptType.getOutputDescriptor(script);
@@ -927,7 +973,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     /**
      * Determines the dust threshold for creating a new change output in this wallet.
      *
-     * @param output The output under consideration
+     * @param output  The output under consideration
      * @param feeRate The fee rate for the transaction creating the change UTXO
      * @return the minimum viable value than the provided change output must have in order to not be dust
      */
@@ -940,8 +986,8 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
      * This is done by calculating the sum of multiplying the size of the output at the current fee rate,
      * and the size of the input needed to spend it in future at the long term fee rate
      *
-     * @param output The output to be added
-     * @param feeRate The transaction's fee rate
+     * @param output          The output to be added
+     * @param feeRate         The transaction's fee rate
      * @param longTermFeeRate The long term minimum fee rate
      * @return The fee that adding this output would add
      */
@@ -1004,18 +1050,18 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
         TransactionOutput prevTxOut = transaction.addOutput(1L, receiveNode.getAddress());
 
         TransactionInput txInput = null;
-        if(getPolicyType().equals(PolicyType.SINGLE)) {
+        if(getPolicyType().equals(PolicyType.SINGLE_HD) || getPolicyType().equals(PolicyType.SINGLE_SP)) {
             ECKey pubKey = receiveNode.getPubKey();
             TransactionSignature signature = TransactionSignature.dummy(getScriptType().getSignatureType());
-            txInput = getScriptType().addSpendingInput(transaction, prevTxOut, pubKey, signature);
-        } else if(getPolicyType().equals(PolicyType.MULTI)) {
+            txInput = getScriptType().addSpendingInput(getPolicyType(), transaction, prevTxOut, pubKey, signature);
+        } else if(getPolicyType().equals(PolicyType.MULTI_HD)) {
             List<ECKey> pubKeys = receiveNode.getPubKeys();
             int threshold = getDefaultPolicy().getNumSignaturesRequired();
             Map<ECKey, TransactionSignature> pubKeySignatures = new TreeMap<>(new ECKey.LexicographicECKeyComparator());
             for(int i = 0; i < pubKeys.size(); i++) {
                 pubKeySignatures.put(pubKeys.get(i), i < threshold ? TransactionSignature.dummy(getScriptType().getSignatureType()) : null);
             }
-            txInput = getScriptType().addMultisigSpendingInput(transaction, prevTxOut, threshold, pubKeySignatures);
+            txInput = getScriptType().addMultisigSpendingInput(getPolicyType(), transaction, prevTxOut, threshold, pubKeySignatures);
         }
 
         assert txInput != null;
@@ -1028,7 +1074,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     }
 
     public long getCostOfChange(double feeRate, double longTermFeeRate) {
-        WalletNode changeNode = getFreshNode(KeyPurpose.CHANGE);
+        WalletNode changeNode = getNode(KeyPurpose.CHANGE);
         TransactionOutput changeOutput = new TransactionOutput(new Transaction(), 1L, changeNode.getOutputScript());
         return getFee(changeOutput, feeRate, longTermFeeRate);
     }
@@ -1083,11 +1129,17 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
                 applySequenceAntiFeeSniping(transaction, selectedUtxos, params.currentBlockHeight());
             }
 
-            for(int i = 1; i < numSets; i+=2) {
-                WalletNode mixNode = getFreshNode(getChangeKeyPurpose());
-                txExcludedChangeNodes.add(mixNode);
-                Payment fakeMixPayment = new WalletNodePayment(mixNode, ".." + mixNode + " (Fake Mix)", totalPaymentAmount, false);
-                fakeMixPayment.setType(Payment.Type.FAKE_MIX);
+            for(int i = 1; i < numSets; i += 2) {
+                Payment fakeMixPayment;
+                Payment.Type type = Payment.Type.FAKE_MIX;
+                if(policyType == PolicyType.SINGLE_SP) {
+                    SilentPaymentAddress spChangeAddress = getSilentPaymentScanAddress().getChangeAddress().getSilentPaymentAddress();
+                    fakeMixPayment = new SilentPayment(spChangeAddress, "(" + type.toDisplayString() + ")", totalPaymentAmount, false, type);
+                } else {
+                    WalletNode mixNode = getFreshNode(getChangeKeyPurpose());
+                    txExcludedChangeNodes.add(mixNode);
+                    fakeMixPayment = new WalletNodePayment(mixNode, ".." + mixNode + " (" + type.toDisplayString() + ")", totalPaymentAmount, false, type);
+                }
                 txPayments.add(fakeMixPayment);
             }
 
@@ -1095,7 +1147,11 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
             for(Payment payment : txPayments) {
                 if(payment instanceof SilentPayment silentPayment) {
                     TransactionOutput output = transaction.addOutput(payment.getAmount(), new Script(new byte[0]));
-                    outputs.add(new WalletTransaction.SilentPaymentOutput(output, silentPayment));
+                    if(policyType == PolicyType.SINGLE_SP && getSilentPaymentScanAddress().getSilentPaymentAddress().equals(silentPayment.getSilentPaymentAddress())) {
+                        outputs.add(new WalletTransaction.SilentPaymentConsolidationOutput(output, silentPayment));
+                    } else {
+                        outputs.add(new WalletTransaction.SilentPaymentOutput(output, silentPayment));
+                    }
                 } else if(payment instanceof WalletNodePayment walletNodePayment) {
                     TransactionOutput output = transaction.addOutput(payment.getAmount(), payment.getAddress());
                     outputs.add(new WalletTransaction.ConsolidationOutput(output, walletNodePayment, payment.getAmount()));
@@ -1111,7 +1167,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
                 outputs.add(new WalletTransaction.NonAddressOutput(output));
             }
 
-            double noChangeVSize = transaction.getVirtualSize();
+            double noChangeVSize = WalletTransaction.getVirtualSize(transaction, outputs);
             long noChangeFeeRequiredAmt = params.getRequiredFeeAmount(noChangeVSize);
 
             //Add 1 satoshi to accommodate longer signatures when feeRate equals the current or common min relay fee to ensure fee is sufficient for maximum "relayability"
@@ -1147,17 +1203,15 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
                 continue;
             }
 
-            //Determine if a change output is required by checking if its value is greater than its dust threshold
+            //Determine if a change output is required by checking if its value exceeds both the cost of change and the relay dust threshold
             List<Long> setChangeAmts = getSetChangeAmounts(selectedUtxoSets, totalPaymentAmount, noChangeFeeRequiredAmt);
-            double noChangeFeeRate = (params.fee() == null ? params.feeRate() : noChangeFeeRequiredAmt / transaction.getVirtualSize());
+            double noChangeFeeRate = (params.fee() == null ? params.feeRate() : noChangeFeeRequiredAmt / noChangeVSize);
+            TransactionOutput changeOutput = new TransactionOutput(transaction, setChangeAmts.getFirst(), getNode(KeyPurpose.CHANGE).getOutputScript());
             long costOfChangeAmt = getCostOfChange(noChangeFeeRate, params.longTermFeeRate());
-            if(setChangeAmts.stream().allMatch(amt -> amt > costOfChangeAmt) || (numSets > 1 && differenceAmt / transaction.getVirtualSize() > noChangeFeeRate * 2)) {
+            long dustThresholdAmt = getDustThreshold(changeOutput, Transaction.DUST_RELAY_TX_FEE);
+            long minChangeAmt = Math.max(costOfChangeAmt, dustThresholdAmt);
+            if(setChangeAmts.stream().allMatch(amt -> amt > minChangeAmt) || (numSets > 1 && differenceAmt / noChangeVSize > noChangeFeeRate * 2)) {
                 //Change output is required, determine new fee once change output has been added
-                WalletNode changeNode = getFreshNode(getChangeKeyPurpose());
-                while(txExcludedChangeNodes.contains(changeNode)) {
-                    changeNode = getFreshNode(getChangeKeyPurpose(), changeNode);
-                }
-                TransactionOutput changeOutput = new TransactionOutput(transaction, setChangeAmts.getFirst(), changeNode.getOutputScript());
                 double changeVSize = noChangeVSize + changeOutput.getLength() * numSets;
                 long changeFeeRequiredAmt = params.getRequiredFeeAmount(changeVSize);
                 if(params.isMinRelayRate()) {
@@ -1170,16 +1224,30 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
                 //Add change output(s)
                 Map<WalletNode, Long> changeMap = new LinkedHashMap<>();
                 setChangeAmts = getSetChangeAmounts(selectedUtxoSets, totalPaymentAmount, changeFeeRequiredAmt);
-                for(Long setChangeAmt : setChangeAmts) {
-                    TransactionOutput output = transaction.addOutput(setChangeAmt, changeNode.getOutputScript());
-                    outputs.add(new WalletTransaction.ChangeOutput(output, changeNode, setChangeAmt));
-                    changeMap.put(changeNode, setChangeAmt);
-                    changeNode = getFreshNode(getChangeKeyPurpose(), changeNode);
+                if(policyType == PolicyType.SINGLE_SP) {
+                    SilentPaymentAddress spChangeAddress = getSilentPaymentScanAddress().getChangeAddress().getSilentPaymentAddress();
+                    for(Long setChangeAmt : setChangeAmts) {
+                        TransactionOutput output = transaction.addOutput(setChangeAmt, new Script(new byte[0]));
+                        SilentPayment changeSilentPayment = new SilentPayment(spChangeAddress, null, setChangeAmt, false);
+                        outputs.add(new WalletTransaction.SilentPaymentChangeOutput(output, changeSilentPayment));
+                    }
+                } else {
+                    WalletNode changeNode = getFreshNode(getChangeKeyPurpose());
+                    while(txExcludedChangeNodes.contains(changeNode)) {
+                        changeNode = getFreshNode(getChangeKeyPurpose(), changeNode);
+                    }
+                    for(Long setChangeAmt : setChangeAmts) {
+                        TransactionOutput output = transaction.addOutput(setChangeAmt, changeNode.getOutputScript());
+                        outputs.add(new WalletTransaction.ChangeOutput(output, changeNode, setChangeAmt));
+                        changeMap.put(changeNode, setChangeAmt);
+                        changeNode = getFreshNode(getChangeKeyPurpose(), changeNode);
+                    }
                 }
 
-                if(setChangeAmts.stream().anyMatch(amt -> amt < costOfChangeAmt)) {
+                if(setChangeAmts.stream().anyMatch(amt -> amt < minChangeAmt)) {
                     //The new fee has meant that one of the change outputs is now dust. We pay too high a fee without change, but change is dust when added.
-                    if(numSets > 1 && differenceAmt / transaction.getVirtualSize() < noChangeFeeRate * 2) {
+                    //Recomputed rather than reusing noChangeVSize above, the change outputs having since been added
+                    if(numSets > 1 && differenceAmt / WalletTransaction.getVirtualSize(transaction, outputs) < noChangeFeeRate * 2) {
                         //Maximize privacy. Pay a higher fee to keep multiple output sets.
                         return new WalletTransaction(this, transaction, params.utxoSelectors(), selectedUtxoSets, txPayments, outputs, differenceAmt);
                     } else {
@@ -1197,22 +1265,22 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     }
 
     private void applySequenceAntiFeeSniping(Transaction transaction, Map<BlockTransactionHashIndex, WalletNode> selectedUtxos, int currentBlockHeight) {
-        Random random = new Random();
-        boolean locktime = random.nextInt(2) == 0 || getScriptType() != P2TR || selectedUtxos.keySet().stream().anyMatch(utxo -> utxo.getConfirmations(currentBlockHeight) > 65535);
+        boolean locktime = SECURE_RANDOM.nextInt(2) == 0 || getScriptType() != P2TR
+                || selectedUtxos.keySet().stream().anyMatch(utxo -> utxo.getConfirmations(currentBlockHeight) > 65535 || utxo.getConfirmations(currentBlockHeight) <= 0);
 
         if(locktime) {
             transaction.setLocktime(currentBlockHeight);
-            if(random.nextInt(10) == 0) {
-                transaction.setLocktime(Math.max(0, currentBlockHeight - random.nextInt(100)));
+            if(SECURE_RANDOM.nextInt(10) == 0) {
+                transaction.setLocktime(Math.max(0, currentBlockHeight - SECURE_RANDOM.nextInt(100)));
             }
         } else {
             transaction.setLocktime(0);
-            int inputIndex = random.nextInt(transaction.getInputs().size());
+            int inputIndex = SECURE_RANDOM.nextInt(transaction.getInputs().size());
             TransactionInput txInput = transaction.getInputs().get(inputIndex);
             BlockTransactionHashIndex utxo = selectedUtxos.keySet().stream().filter(ref -> ref.getHash().equals(txInput.getOutpoint().getHash()) && ref.getIndex() == txInput.getOutpoint().getIndex()).findFirst().orElseThrow();
             txInput.setSequenceNumber(utxo.getConfirmations(currentBlockHeight));
-            if(random.nextInt(10) == 0) {
-                txInput.setSequenceNumber(Math.max(0, txInput.getSequenceNumber() - random.nextInt(100)));
+            if(SECURE_RANDOM.nextInt(10) == 0) {
+                txInput.setSequenceNumber(Math.max(1, txInput.getSequenceNumber() - SECURE_RANDOM.nextInt(100)));
             }
         }
     }
@@ -1231,17 +1299,17 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
 
     public static TransactionInput addDummySpendingInput(Transaction transaction, WalletNode walletNode, TransactionOutput prevTxOut) {
         Wallet signingWallet = walletNode.getWallet();
-        if(signingWallet.getPolicyType().equals(PolicyType.SINGLE)) {
+        if(signingWallet.getPolicyType().equals(PolicyType.SINGLE_HD) || signingWallet.getPolicyType().equals(PolicyType.SINGLE_SP)) {
             ECKey pubKey = walletNode.getPubKey();
-            return signingWallet.getScriptType().addSpendingInput(transaction, prevTxOut, pubKey, TransactionSignature.dummy(signingWallet.getScriptType().getSignatureType()));
-        } else if(signingWallet.getPolicyType().equals(PolicyType.MULTI)) {
+            return signingWallet.getScriptType().addSpendingInput(signingWallet.getPolicyType(), transaction, prevTxOut, pubKey, TransactionSignature.dummy(signingWallet.getScriptType().getSignatureType()));
+        } else if(signingWallet.getPolicyType().equals(PolicyType.MULTI_HD)) {
             List<ECKey> pubKeys = walletNode.getPubKeys();
             int threshold = signingWallet.getDefaultPolicy().getNumSignaturesRequired();
             Map<ECKey, TransactionSignature> pubKeySignatures = new TreeMap<>(new ECKey.LexicographicECKeyComparator());
             for(int i = 0; i < pubKeys.size(); i++) {
                 pubKeySignatures.put(pubKeys.get(i), i < threshold ? TransactionSignature.dummy(signingWallet.getScriptType().getSignatureType()) : null);
             }
-            return signingWallet.getScriptType().addMultisigSpendingInput(transaction, prevTxOut, threshold, pubKeySignatures);
+            return signingWallet.getScriptType().addMultisigSpendingInput(signingWallet.getPolicyType(), transaction, prevTxOut, threshold, pubKeySignatures);
         } else {
             throw new UnsupportedOperationException("Cannot create transaction for policy type " + signingWallet.getPolicyType());
         }
@@ -1277,7 +1345,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
                     Map<BlockTransactionHashIndex, WalletNode> selectedInputsMap = new LinkedHashMap<>();
                     List<BlockTransactionHashIndex> shuffledInputs = new ArrayList<>(selectedInputs);
                     if(utxoSelector.shuffleInputs()) {
-                        Collections.shuffle(shuffledInputs);
+                        Collections.shuffle(shuffledInputs, SECURE_RANDOM);
                     }
                     for(BlockTransactionHashIndex shuffledInput : shuffledInputs) {
                         selectedInputsMap.put(shuffledInput, availableTxos.get(shuffledInput));
@@ -1344,7 +1412,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
         return allInputsFromWallet(allTransactions, allTxos, txId);
     }
 
-    private boolean allInputsFromWallet(Map<Sha256Hash, BlockTransaction> walletTransactions, Map<BlockTransactionHashIndex, WalletNode> walletTxos, Sha256Hash txId) {
+    public boolean allInputsFromWallet(Map<Sha256Hash, BlockTransaction> walletTransactions, Map<BlockTransactionHashIndex, WalletNode> walletTxos, Sha256Hash txId) {
         BlockTransaction utxoBlkTx = walletTransactions.get(txId);
         if(utxoBlkTx == null) {
             //Provided txId was not a wallet transaction
@@ -1372,6 +1440,10 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
 
     private boolean isNotificationChange(Map<Sha256Hash, BlockTransaction> walletTransactions, Sha256Hash txId) {
         BlockTransaction utxoBlkTx = walletTransactions.get(txId);
+        if(utxoBlkTx == null) {
+            return false;
+        }
+
         try {
             PaymentCode.getOpReturnData(utxoBlkTx.getTransaction());
             return true;
@@ -1386,7 +1458,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
      * Determines the maximum total amount this wallet can send for the number and type of addresses at the given fee rate
      *
      * @param paymentAddresses the addresses to sent to (amounts are irrelevant)
-     * @param feeRate the fee rate in sats/vB
+     * @param feeRate          the fee rate in sats/vB
      * @return the maximum spendable amount (can be negative if the fee is higher than the combined UTXO value)
      */
     public long getMaxSpendable(List<Address> paymentAddresses, double feeRate, Map<BlockTransactionHashIndex, WalletNode> availableTxos) {
@@ -1424,13 +1496,30 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
      * @return A map if the PSBT inputs and the nodes that can sign them
      */
     public Map<TransactionInput, WalletNode> getSigningNodes(Transaction transaction) {
+        return getSigningNodes(transaction, this::getWalletTransactionBody);
+    }
+
+    public Map<TransactionInput, WalletNode> getSigningNodes(Transaction transaction, Function<Sha256Hash, Transaction> inputTransactions) {
+        return getSigningNodes(transaction, inputTransactions, getWalletOutputScripts());
+    }
+
+    /**
+     * Determines the nodes in this wallet that can sign a transaction, against output scripts built once for several transactions, since building
+     * them visits every address node of the wallet
+     *
+     * @param transaction The transaction to be signed, or that has been signed
+     * @param inputTransactions Returns the transaction with the given txid, or null where it is not known
+     * @param walletOutputScripts This wallet's output scripts, as returned by getWalletOutputScripts()
+     * @return A map of the transaction inputs and the nodes that can sign them
+     */
+    public Map<TransactionInput, WalletNode> getSigningNodes(Transaction transaction, Function<Sha256Hash, Transaction> inputTransactions,
+                                                             Map<Script, WalletNode> walletOutputScripts) {
         Map<TransactionInput, WalletNode> signingNodes = new LinkedHashMap<>();
-        Map<Script, WalletNode> walletOutputScripts = getWalletOutputScripts();
 
         for(TransactionInput txInput : transaction.getInputs()) {
-            BlockTransaction blockTransaction = getWalletTransaction(txInput.getOutpoint().getHash());
-            if(blockTransaction != null && blockTransaction.getTransaction().getOutputs().size() > txInput.getOutpoint().getIndex()) {
-                TransactionOutput utxo = blockTransaction.getTransaction().getOutputs().get((int)txInput.getOutpoint().getIndex());
+            Transaction inputTransaction = inputTransactions.apply(txInput.getOutpoint().getHash());
+            if(inputTransaction != null && inputTransaction.getOutputs().size() > txInput.getOutpoint().getIndex()) {
+                TransactionOutput utxo = inputTransaction.getOutputs().get((int)txInput.getOutpoint().getIndex());
 
                 if(utxo != null) {
                     Script scriptPubKey = utxo.getScript();
@@ -1452,36 +1541,61 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
      * @return A map keyed with the transactionInput mapped to a map of the signatures and associated keystores that signed it
      */
     public Map<TransactionInput, Map<TransactionSignature, Keystore>> getSignedKeystores(Transaction transaction) {
-        Map<TransactionInput, WalletNode> signingNodes = getSigningNodes(transaction);
+        return getSignedKeystores(transaction, this::getWalletTransactionBody);
+    }
+
+    /**
+     * Determines which keystores have signed a transaction, looking up the transactions its inputs spend with the given function
+     *
+     * @param transaction The signed transaction
+     * @param inputTransactions Returns the transaction with the given txid, or null where it is not known
+     * @return A map keyed with the transactionInput mapped to a map of the signatures and associated keystores that signed it. A taproot input is absent
+     * where any transaction spent by the inputs is unknown, since its signature hash commits to all of their outputs
+     */
+    public Map<TransactionInput, Map<TransactionSignature, Keystore>> getSignedKeystores(Transaction transaction, Function<Sha256Hash, Transaction> inputTransactions) {
+        return getSignedKeystores(transaction, inputTransactions, getSigningNodes(transaction, inputTransactions));
+    }
+
+    private Map<TransactionInput, Map<TransactionSignature, Keystore>> getSignedKeystores(Transaction transaction, Function<Sha256Hash, Transaction> inputTransactions,
+                                                                                         Map<TransactionInput, WalletNode> signingNodes) {
         Map<TransactionInput, Map<TransactionSignature, Keystore>> signedKeystores = new LinkedHashMap<>();
+
+        boolean anyTaproot = signingNodes.values().stream().anyMatch(node -> node.getWallet().getScriptType() == P2TR);
+        List<TransactionOutput> spentOutputs = anyTaproot ? getSpentOutputs(transaction, inputTransactions) : null;
 
         for(TransactionInput txInput : signingNodes.keySet()) {
             WalletNode walletNode = signingNodes.get(txInput);
             Wallet signingWallet = walletNode.getWallet();
             Map<ECKey, Keystore> keystoreKeysForNode = signingWallet.getKeystores().stream()
-                    .collect(Collectors.toMap(keystore -> signingWallet.getScriptType().getOutputKey(keystore.getPubKey(walletNode)), Function.identity(),
-                    (u, v) -> { throw new IllegalStateException("Duplicate keys from different keystores for node " + walletNode); },
-                    LinkedHashMap::new));
+                    .collect(Collectors.toMap(keystore -> signingWallet.getScriptType().getOutputKey(signingWallet.getPolicyType(), keystore.getPubKey(walletNode)), Function.identity(),
+                            (u, v) -> {
+                                throw new IllegalStateException("Duplicate keys from different keystores for node " + walletNode);
+                            },
+                            LinkedHashMap::new));
 
             Map<ECKey, TransactionSignature> keySignatureMap = new LinkedHashMap<>();
 
-            BlockTransaction blockTransaction = signingWallet.transactions.get(txInput.getOutpoint().getHash());
-            if(blockTransaction != null && blockTransaction.getTransaction().getOutputs().size() > txInput.getOutpoint().getIndex()) {
-                TransactionOutput spentTxo = blockTransaction.getTransaction().getOutputs().get((int)txInput.getOutpoint().getIndex());
+            Transaction inputTransaction = inputTransactions.apply(txInput.getOutpoint().getHash());
+            boolean taproot = signingWallet.getScriptType() == P2TR;
+            if(inputTransaction != null && inputTransaction.getOutputs().size() > txInput.getOutpoint().getIndex() && (!taproot || spentOutputs != null)) {
+                TransactionOutput spentTxo = inputTransaction.getOutputs().get((int)txInput.getOutpoint().getIndex());
 
                 Script signingScript = getSigningScript(txInput, spentTxo);
-                Sha256Hash hash;
-                if(signingWallet.getScriptType() == P2TR) {
-                    List<TransactionOutput> spentOutputs = transaction.getInputs().stream().map(input -> signingWallet.transactions.get(input.getOutpoint().getHash()).getTransaction().getOutputs().get((int)input.getOutpoint().getIndex())).collect(Collectors.toList());
-                    hash = transaction.hashForTaprootSignature(spentOutputs, txInput.getIndex(), !P2TR.isScriptType(signingScript), signingScript, SigHash.DEFAULT, null);
-                } else if(txInput.hasWitness()) {
-                    hash = transaction.hashForWitnessSignature(txInput.getIndex(), signingScript, spentTxo.getValue(), SigHash.ALL);
-                } else {
-                    hash = transaction.hashForLegacySignature(txInput.getIndex(), signingScript, SigHash.ALL);
-                }
+                List<TransactionSignature> signatures = txInput.hasWitness() ? txInput.getWitness().getSignatures() : txInput.getScriptSig().getSignatures();
+                Map<Byte, Sha256Hash> sigHashes = new HashMap<>();
 
                 for(ECKey sigPublicKey : keystoreKeysForNode.keySet()) {
-                    for(TransactionSignature signature : txInput.hasWitness() ? txInput.getWitness().getSignatures() : txInput.getScriptSig().getSignatures()) {
+                    for(TransactionSignature signature : signatures) {
+                        Sha256Hash hash = sigHashes.computeIfAbsent(signature.sighashFlags, sigHashType -> {
+                            if(signingWallet.getScriptType() == P2TR) {
+                                return transaction.hashForTaprootSignature(spentOutputs, txInput.getIndex(), !P2TR.isScriptType(signingScript), signingScript, sigHashType, null);
+                            } else if(txInput.hasWitness()) {
+                                return transaction.hashForWitnessSignature(txInput.getIndex(), signingScript.getProgram(), spentTxo.getValue(), sigHashType);
+                            } else {
+                                return transaction.hashForLegacySignature(txInput.getIndex(), signingScript.getProgram(), sigHashType);
+                            }
+                        });
+
                         if(sigPublicKey.verify(hash, signature)) {
                             keySignatureMap.put(sigPublicKey, signature);
                         }
@@ -1500,6 +1614,60 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
         }
 
         return signedKeystores;
+    }
+
+    /**
+     * Determines which inputs of a signed transaction spend this wallet's outputs without valid signatures from enough of its keystores to do so,
+     * including those that cannot be checked because a transaction their signature hash commits to is unknown
+     *
+     * @param transaction The signed transaction
+     * @param inputTransactions Returns the transaction with the given txid, or null where it is not known
+     * @return The inputs spending this wallet's outputs that are not shown to be signed by it
+     */
+    public Set<TransactionInput> getUnsignedInputs(Transaction transaction, Function<Sha256Hash, Transaction> inputTransactions) {
+        return getUnsignedInputs(transaction, inputTransactions, getWalletOutputScripts());
+    }
+
+    /**
+     * Determines which inputs of a signed transaction spend this wallet's outputs without valid signatures from enough of its keystores to do so,
+     * against output scripts built once for several transactions
+     *
+     * @param transaction The signed transaction
+     * @param inputTransactions Returns the transaction with the given txid, or null where it is not known
+     * @param walletOutputScripts This wallet's output scripts, as returned by getWalletOutputScripts()
+     * @return The inputs spending this wallet's outputs that are not shown to be signed by it
+     */
+    public Set<TransactionInput> getUnsignedInputs(Transaction transaction, Function<Sha256Hash, Transaction> inputTransactions, Map<Script, WalletNode> walletOutputScripts) {
+        Map<TransactionInput, WalletNode> signingNodes = getSigningNodes(transaction, inputTransactions, walletOutputScripts);
+        Map<TransactionInput, Map<TransactionSignature, Keystore>> signedKeystores = getSignedKeystores(transaction, inputTransactions, signingNodes);
+        Set<TransactionInput> unsignedInputs = new LinkedHashSet<>();
+        for(Map.Entry<TransactionInput, WalletNode> entry : signingNodes.entrySet()) {
+            Map<TransactionSignature, Keystore> signatures = signedKeystores.get(entry.getKey());
+            int threshold = entry.getValue().getWallet().getDefaultPolicy().getNumSignaturesRequired();
+            if(signatures == null || new HashSet<>(signatures.values()).size() < threshold) {
+                unsignedInputs.add(entry.getKey());
+            }
+        }
+
+        return unsignedInputs;
+    }
+
+    private List<TransactionOutput> getSpentOutputs(Transaction transaction, Function<Sha256Hash, Transaction> inputTransactions) {
+        List<TransactionOutput> spentOutputs = new ArrayList<>(transaction.getInputs().size());
+        for(TransactionInput input : transaction.getInputs()) {
+            Transaction inputTransaction = inputTransactions.apply(input.getOutpoint().getHash());
+            if(inputTransaction == null || inputTransaction.getOutputs().size() <= input.getOutpoint().getIndex()) {
+                return null;
+            }
+            spentOutputs.add(inputTransaction.getOutputs().get((int)input.getOutpoint().getIndex()));
+        }
+
+        return spentOutputs;
+    }
+
+    private Transaction getWalletTransactionBody(Sha256Hash txid) {
+        BlockTransaction blockTransaction = getWalletTransaction(txid);
+        return blockTransaction == null ? null : blockTransaction.getTransaction();
     }
 
     private Script getSigningScript(TransactionInput txInput, TransactionOutput spentTxo) {
@@ -1523,7 +1691,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     }
 
     public boolean canSignAllInputs(PSBT psbt) {
-        return isValid() && getSigningNodes(psbt).size() == psbt.getPsbtInputs().size();
+        return isValid() && getSigningNodes(psbt, false).size() == psbt.getPsbtInputs().size();
     }
 
     /**
@@ -1533,6 +1701,10 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
      * @return A map if the PSBT inputs and the nodes that can sign them
      */
     public Map<PSBTInput, WalletNode> getSigningNodes(PSBT psbt) {
+        return getSigningNodes(psbt, true);
+    }
+
+    public Map<PSBTInput, WalletNode> getSigningNodes(PSBT psbt, boolean useDerivationFallback) {
         Map<PSBTInput, WalletNode> signingNodes = new LinkedHashMap<>();
         Map<Script, WalletNode> walletOutputScripts = getWalletOutputScripts();
 
@@ -1542,6 +1714,12 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
             if(utxo != null) {
                 Script scriptPubKey = utxo.getScript();
                 WalletNode signingNode = walletOutputScripts.get(scriptPubKey);
+
+                // BIP32-derivation fallback for inputs beyond the wallet's derived address range
+                if(signingNode == null && useDerivationFallback && policyType != PolicyType.SINGLE_SP) {
+                    signingNode = getSigningNodeFromDerivation(psbtInput, scriptPubKey);
+                }
+
                 if(signingNode != null) {
                     signingNodes.put(psbtInput, signingNode);
                 }
@@ -1549,6 +1727,76 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
         }
 
         return signingNodes;
+    }
+
+    private WalletNode getSigningNodeFromDerivation(PSBTInput psbtInput, Script scriptPubKey) {
+        Map<ECKey, KeyDerivation> derivedPublicKeys = psbtInput.getDerivedPublicKeys();
+        Map<ECKey, Map<KeyDerivation, List<Sha256Hash>>> tapDerivedPublicKeys = psbtInput.getTapDerivedPublicKeys();
+
+        for(Map.Entry<ECKey, KeyDerivation> entry : derivedPublicKeys.entrySet()) {
+            WalletNode node = matchDerivation(entry.getValue(), scriptPubKey);
+            if(node != null) {
+                return node;
+            }
+        }
+
+        for(Map.Entry<ECKey, Map<KeyDerivation, List<Sha256Hash>>> entry : tapDerivedPublicKeys.entrySet()) {
+            for(KeyDerivation keyDerivation : entry.getValue().keySet()) {
+                WalletNode node = matchDerivation(keyDerivation, scriptPubKey);
+                if(node != null) {
+                    return node;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private WalletNode matchDerivation(KeyDerivation keyDerivation, Script scriptPubKey) {
+        for(Keystore keystore : getKeystores()) {
+            ECKey derivedKey = keystore.getPubKeyForDerivation(keyDerivation);
+            if(derivedKey == null) {
+                continue;
+            }
+
+            List<ChildNumber> fullPath = keyDerivation.getDerivation();
+            List<ChildNumber> keystorePath = keystore.getKeyDerivation().getDerivation();
+            List<ChildNumber> remaining;
+            if(fullPath.size() > keystorePath.size() && fullPath.subList(0, keystorePath.size()).equals(keystorePath)) {
+                remaining = fullPath.subList(keystorePath.size(), fullPath.size());
+            } else {
+                remaining = fullPath;
+            }
+            if(remaining.size() != 2) {
+                continue;
+            }
+
+            KeyPurpose keyPurpose = KeyPurpose.fromChildNumber(remaining.get(0));
+            int addressIndex = remaining.get(1).num();
+
+            if(keyPurpose == null || !getWalletKeyPurposes().contains(keyPurpose)) {
+                continue;
+            }
+
+            WalletNode purposeNode = getNode(keyPurpose);
+            WalletNode targetNode = null;
+            for(WalletNode child : purposeNode.getChildren()) {
+                if(child.getIndex() == addressIndex) {
+                    targetNode = child;
+                    break;
+                }
+            }
+            if(targetNode == null) {
+                targetNode = new WalletNode(this, keyPurpose, addressIndex);
+            }
+
+            Script expectedScript = getOutputScript(targetNode);
+            if(expectedScript.equals(scriptPubKey)) {
+                return targetNode;
+            }
+        }
+
+        return null;
     }
 
     public Collection<Keystore> getSigningKeystores(PSBT psbt) {
@@ -1577,12 +1825,16 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     }
 
     public Integer getRequiredGapLimit(PSBT psbt) {
+        if(policyType == PolicyType.SINGLE_SP) {
+            return null;
+        }
+
         Wallet copy = this.copy();
         for(KeyPurpose keyPurpose : KeyPurpose.DEFAULT_PURPOSES) {
             WalletNode purposeNode = copy.getNode(keyPurpose);
             purposeNode.fillToIndex(purposeNode.getChildren().size() + SEARCH_LOOKAHEAD);
         }
-        Map<PSBTInput, WalletNode> copySigningNodes = copy.getSigningNodes(psbt);
+        Map<PSBTInput, WalletNode> copySigningNodes = copy.getSigningNodes(psbt, false);
         boolean found = false;
         int gapLimit = getGapLimit();
         for(KeyPurpose keyPurpose : KeyPurpose.DEFAULT_PURPOSES) {
@@ -1611,9 +1863,11 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
             WalletNode walletNode = signingNodes.get(psbtInput);
             Wallet signingWallet = walletNode.getWallet();
             Map<ECKey, Keystore> keystoreKeysForNode = signingWallet.getKeystores().stream()
-                    .collect(Collectors.toMap(keystore -> signingWallet.getScriptType().getOutputKey(keystore.getPubKey(walletNode)), Function.identity(),
-                    (u, v) -> { throw new IllegalStateException("Duplicate keys from different keystores for node " + walletNode); },
-                    LinkedHashMap::new));
+                    .collect(Collectors.toMap(keystore -> signingWallet.getScriptType().getOutputKey(signingWallet.getPolicyType(), keystore.getPubKey(walletNode)), Function.identity(),
+                            (u, v) -> {
+                                throw new IllegalStateException("Duplicate keys from different keystores for node " + walletNode);
+                            },
+                            LinkedHashMap::new));
 
             Map<ECKey, TransactionSignature> keySignatureMap;
             if(psbt.isFinalized() || psbtInput.isTaproot()) {
@@ -1636,6 +1890,16 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
     }
 
     public void sign(PSBT psbt) throws MnemonicException {
+        if(psbt.getPsbtOutputs().stream().anyMatch(o -> o.getSilentPaymentAddress() != null)) {
+            List<PSBTInput> psbtInputs = psbt.getPsbtInputs();
+            for(int i = 0; i < psbtInputs.size(); i++) {
+                SigHash inputSigHash = psbtInputs.get(i).getSigHash();
+                if(inputSigHash != null && inputSigHash != SigHash.ALL && inputSigHash != SigHash.DEFAULT) {
+                    throw new IllegalStateException("Silent payment outputs require SIGHASH_ALL/DEFAULT signatures. Input at index " + i + " has sighash type: " + inputSigHash);
+                }
+            }
+        }
+
         sign(getSigningNodes(psbt));
     }
 
@@ -1644,25 +1908,166 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
             Wallet signingWallet = signingEntry.getValue().getWallet();
             for(Keystore keystore : signingWallet.getKeystores()) {
                 if(keystore.hasPrivateKey()) {
-                    ECKey privKey = signingWallet.getScriptType().getOutputKey(keystore.getKey(signingEntry.getValue()));
                     PSBTInput psbtInput = signingEntry.getKey();
 
                     if(!psbtInput.isSigned()) {
-                        psbtInput.sign(privKey);
+                        if(psbtInput.getSilentPaymentsTweak() != null && keystore.getSilentPaymentScanAddress() != null && signingWallet.getPolicyType() == PolicyType.SINGLE_SP) {
+                            ECKey spendPrivKey = keystore.getSpendPrivateKey(psbtInput.getSilentPaymentsSpendDerivations());
+                            psbtInput.signSilentPayments(spendPrivKey);
+                        } else {
+                            ECKey privKey = signingWallet.getScriptType().getOutputKey(signingWallet.getPolicyType(), keystore.getKey(signingEntry.getValue()));
+                            psbtInput.sign(privKey);
+                        }
                     }
                 }
             }
         }
     }
 
-    public List<SilentPayment> computeSilentPaymentOutputs(PSBT psbt, Map<PSBTInput, WalletNode> signingNodes) throws InvalidSilentPaymentException {
+    /**
+     * Returns the subset of PSBT_OUT_SP_V0_INFO entries whose claimed silent payment address
+     * actually derives the PSBT output script under BIP-352, as proven by the PSBT's BIP-375
+     * ECDH shares and DLEQ proofs (global or per-input form) against this wallet's input public
+     * keys. Verification uses public keys only and works for both software and hardware keystores.
+     * Returns an empty map if any input is not from this wallet, if BIP-375 metadata is missing
+     * or inconsistent, if any DLEQ proof fails to verify, or if any claimed script does not
+     * match the BIP-352 derivation.
+     */
+    public Map<Address, SilentPaymentAddress> verifySilentPaymentOutputs(PSBT psbt) {
+        Map<Address, SilentPaymentAddress> verified = new LinkedHashMap<>();
+        if(psbt == null) {
+            return verified;
+        }
+
+        List<PSBTOutput> spOutputs = new ArrayList<>();
+        for(PSBTOutput psbtOutput : psbt.getPsbtOutputs()) {
+            if(psbtOutput.getSilentPaymentAddress() == null) {
+                continue;
+            }
+            Script script = psbtOutput.getScript();
+            if(script == null || script.getToAddress() == null) {
+                return verified;
+            }
+            spOutputs.add(psbtOutput);
+        }
+
+        if(spOutputs.isEmpty()) {
+            return verified;
+        }
+
+        try {
+            verifySilentPaymentScripts(psbt, getSigningNodes(psbt));
+
+            for(PSBTOutput psbtOutput : spOutputs) {
+                verified.put(psbtOutput.getScript().getToAddress(), psbtOutput.getSilentPaymentAddress());
+            }
+        } catch(Exception e) {
+            return new LinkedHashMap<>();
+        }
+
+        return verified;
+    }
+
+    /**
+     * Verifies the silent payment output scripts already resolved in the given PSBT against the nodes of this wallet providing its inputs.
+     *
+     * @param psbt the PSBT to verify
+     * @throws InvalidSilentPaymentException if a resolved silent payment output script cannot be verified
+     */
+    public void verifySilentPaymentScripts(PSBT psbt) throws InvalidSilentPaymentException {
+        if(psbt == null || !psbt.hasSilentPaymentOutputs()) {
+            return;
+        }
+
+        verifySilentPaymentScripts(psbt, getSigningNodes(psbt));
+    }
+
+    /**
+     * Verifies that the silent payment output scripts already resolved in the given PSBT are derived from the claimed silent payment addresses,
+     * as proven by the PSBT's BIP-375 ECDH shares and DLEQ proofs against the public keys of this wallet's inputs.
+     * Verification is skipped only while every silent payment output is still unresolved and nothing has yet signed over them, since the BIP-352 index
+     * of the outputs sharing a scan key is taken from the resolved scripts alone - a partially resolved set is rejected rather than verified.
+     * Since a resolved script is not part of the transaction the PSBT represents, an unproven script must be rejected before a signature commits to it.
+     *
+     * @param psbt the PSBT to verify
+     * @param signingNodes the wallet nodes providing the PSBT inputs
+     * @throws InvalidSilentPaymentException if a resolved silent payment output script cannot be verified
+     */
+    public void verifySilentPaymentScripts(PSBT psbt, Map<PSBTInput, WalletNode> signingNodes) throws InvalidSilentPaymentException {
         List<PSBTOutput> silentOutputs = psbt.getPsbtOutputs().stream().filter(psbtOutput -> psbtOutput.getSilentPaymentAddress() != null).collect(Collectors.toList());
-        if(!silentOutputs.isEmpty()) {
-            if(psbt.getPsbtInputs().size() != signingNodes.size()) {
-                throw new InvalidSilentPaymentException("All inputs must be from wallet to calculate silent payment addresses");
+        //An unresolved silent payment output has an omitted or empty script, and any other script must be proven whether or not it parses as an address
+        long resolved = silentOutputs.stream().filter(psbtOutput -> psbtOutput.getScript() != null && !psbtOutput.getScript().isEmpty()).count();
+        if(resolved == 0) {
+            //An unresolved set is what a wallet hands a signer to compute, so it is only a problem once something has signed over it: a signature
+            //commits to the output scripts, and one made while they are still empty can never be valid. Refusing it here keeps such a PSBT from being
+            //combined, saved or exported, where the check made when the transaction is extracted would refuse only the broadcast
+            if(!silentOutputs.isEmpty() && psbt.getPsbtInputs().stream().anyMatch(psbtInput -> !psbtInput.getPartialSignatures().isEmpty()
+                    || psbtInput.getTapKeyPathSignature() != null || psbtInput.isFinalized())) {
+                throw new InvalidSilentPaymentException("Signatures cannot commit to silent payment outputs that have not been computed");
             }
 
-            List<SilentPayment> silentPayments = silentOutputs.stream()
+            return;
+        }
+
+        if(resolved != silentOutputs.size()) {
+            throw new InvalidSilentPaymentException("Silent payment outputs must be all resolved or all unresolved to verify the BIP-352 output index");
+        }
+
+        if(psbt.getPsbtInputs().size() != signingNodes.size()) {
+            throw new InvalidSilentPaymentException("The silent payment outputs cannot be verified because not all of the inputs are from this wallet");
+        }
+
+        Map<TransactionInput, ECKey> inputPublicKeys = new LinkedHashMap<>();
+        Transaction transaction = psbt.getTransaction();
+        for(int i = 0; i < psbt.getPsbtInputs().size(); i++) {
+            PSBTInput psbtInput = psbt.getPsbtInputs().get(i);
+            ECKey publicKey = SilentPaymentUtils.getInputPublicKey(signingNodes.get(psbtInput));
+            if(publicKey == null) {
+                throw new InvalidSilentPaymentException("The silent payment outputs cannot be verified because an input public key could not be derived");
+            }
+            inputPublicKeys.put(transaction.getInputs().get(i), publicKey);
+        }
+
+        try {
+            psbt.validateSilentPayments(inputPublicKeys);
+        } catch(PSBTProofException e) {
+            throw new InvalidSilentPaymentException("Silent payment metadata in PSBT failed BIP-375 verification: " + e.getMessage());
+        }
+    }
+
+    public List<SilentPayment> computeSilentPaymentOutputs(PSBT psbt, Map<PSBTInput, WalletNode> signingNodes) throws InvalidSilentPaymentException {
+        List<PSBTOutput> silentOutputs = psbt.getPsbtOutputs().stream().filter(psbtOutput -> psbtOutput.getSilentPaymentAddress() != null).collect(Collectors.toList());
+        if(silentOutputs.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        if(psbt.getPsbtInputs().size() != signingNodes.size()) {
+            throw new InvalidSilentPaymentException("All inputs must be from wallet to calculate silent payment addresses");
+        }
+
+        List<PSBTOutput> preComputedOutputs = new ArrayList<>();
+        List<PSBTOutput> computeOutputs = new ArrayList<>();
+        for(PSBTOutput silentOutput : silentOutputs) {
+            Script script = silentOutput.getScript();
+            //Only an unresolved output has an empty script, so any other script must be proven rather than replaced by the computed one
+            if(script != null && !script.isEmpty()) {
+                preComputedOutputs.add(silentOutput);
+            } else {
+                computeOutputs.add(silentOutput);
+            }
+        }
+
+        List<SilentPayment> results = new ArrayList<>();
+
+        if(!preComputedOutputs.isEmpty()) {
+            verifySilentPaymentScripts(psbt, signingNodes);
+            for(PSBTOutput silentOutput : preComputedOutputs) {
+                results.add(new SilentPayment(silentOutput.getSilentPaymentAddress(), silentOutput.getScript().getToAddress(), null, silentOutput.getAmount(), false));
+            }
+        }
+
+        if(!computeOutputs.isEmpty()) {
+            List<SilentPayment> silentPayments = computeOutputs.stream()
                     .map(psbtOutput -> new SilentPayment(psbtOutput.getSilentPaymentAddress(), null, psbtOutput.getAmount(), false)).collect(Collectors.toList());
             Map<HashIndex, WalletNode> utxos = signingNodes.keySet().stream()
                     .collect(Collectors.toMap(psbtInput -> new HashIndex(psbtInput.getPrevTxid(), psbtInput.getPrevIndex()), signingNodes::get));
@@ -1672,8 +2077,8 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
                 psbt.getSilentPaymentsDLEQProofs().put(key, ecdhShareAndProof.dleqProof());
             });
 
-            for(int i = 0; i < silentOutputs.size(); i++) {
-                PSBTOutput silentOutput = silentOutputs.get(i);
+            for(int i = 0; i < computeOutputs.size(); i++) {
+                PSBTOutput silentOutput = computeOutputs.get(i);
                 SilentPayment silentPayment = silentPayments.get(i);
                 if(!silentPayment.isAddressComputed()) {
                     throw new InvalidSilentPaymentException("Silent payment address was not calculated");
@@ -1681,13 +2086,12 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
 
                 Script outputScript = silentPayment.getAddress().getOutputScript();
                 silentOutput.setScript(outputScript);
-                addSilentPaymentAddress(silentPayment.getAddress(), silentPayment.getSilentPaymentAddress());
             }
 
-            return silentPayments;
+            results.addAll(silentPayments);
         }
 
-        return Collections.emptyList();
+        return results;
     }
 
     public void finalise(PSBT psbt) {
@@ -1723,15 +2127,16 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
                 Transaction transaction = new Transaction();
 
                 TransactionInput finalizedTxInput;
-                if(getPolicyType().equals(PolicyType.SINGLE)) {
+                Wallet signingWallet = signingNode.getWallet();
+                if(signingWallet.getPolicyType().equals(PolicyType.SINGLE_HD) || signingWallet.getPolicyType().equals(PolicyType.SINGLE_SP)) {
                     ECKey pubKey = signingNode.getPubKey();
                     TransactionSignature transactionSignature = psbtInput.isTaproot() ? psbtInput.getTapKeyPathSignature() : psbtInput.getPartialSignature(pubKey);
                     if(transactionSignature == null) {
                         throw new IllegalArgumentException("Pubkey of partial signature does not match wallet pubkey");
                     }
 
-                    finalizedTxInput = signingNode.getWallet().getScriptType().addSpendingInput(transaction, utxo, pubKey, transactionSignature);
-                } else if(getPolicyType().equals(PolicyType.MULTI)) {
+                    finalizedTxInput = signingWallet.getScriptType().addSpendingInput(signingWallet.getPolicyType(), transaction, utxo, pubKey, transactionSignature);
+                } else if(signingWallet.getPolicyType().equals(PolicyType.MULTI_HD)) {
                     List<ECKey> pubKeys = signingNode.getPubKeys();
 
                     Map<ECKey, TransactionSignature> pubKeySignatures = new TreeMap<>(new ECKey.LexicographicECKeyComparator());
@@ -1744,18 +2149,86 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
                         throw new IllegalArgumentException("Pubkeys of partial signatures do not match wallet pubkeys");
                     }
 
-                    finalizedTxInput = signingNode.getWallet().getScriptType().addMultisigSpendingInput(transaction, utxo, threshold, pubKeySignatures);
+                    finalizedTxInput = signingWallet.getScriptType().addMultisigSpendingInput(signingWallet.getPolicyType(), transaction, utxo, threshold, pubKeySignatures);
                 } else {
-                    throw new UnsupportedOperationException("Cannot finalise PSBT for policy type " + getPolicyType());
+                    throw new UnsupportedOperationException("Cannot finalise PSBT for policy type " + signingWallet.getPolicyType());
                 }
 
                 psbtInput.setFinalScriptSig(finalizedTxInput.getScriptSig());
                 psbtInput.setFinalScriptWitness(finalizedTxInput.getWitness());
                 psbtInput.clearNonFinalFields();
+            } else if(signingNode == null) {
+                finaliseExternalInput(psbtInput, utxo, signaturesAvailable);
             }
         }
 
         psbt.getPsbtOutputs().forEach(PSBTOutput::clearNonFinalFields);
+    }
+
+    private void finaliseExternalInput(PSBTInput psbtInput, TransactionOutput utxo, int signaturesAvailable) {
+        Script signingScript = psbtInput.getSigningScript();
+        ScriptType inputScriptType = psbtInput.getScriptType();
+        if(signingScript == null || inputScriptType == null) {
+            return;
+        }
+
+        int inputThreshold;
+        try {
+            inputThreshold = signingScript.getNumRequiredSignatures();
+        } catch(NonStandardScriptException e) {
+            return;
+        }
+
+        if(signaturesAvailable < inputThreshold) {
+            return;
+        }
+
+        Transaction transaction = new Transaction();
+        TransactionInput finalizedTxInput;
+
+        if(MULTISIG.isScriptType(signingScript)) {
+            ECKey[] scriptPubKeys = MULTISIG.getPublicKeysFromScript(signingScript);
+            Map<ECKey, TransactionSignature> pubKeySignatures = new TreeMap<>(new ECKey.LexicographicECKeyComparator());
+            for(ECKey pubKey : scriptPubKeys) {
+                pubKeySignatures.put(pubKey, psbtInput.getPartialSignature(pubKey));
+            }
+
+            long matched = pubKeySignatures.values().stream().filter(Objects::nonNull).count();
+            if(matched < inputThreshold) {
+                return;
+            }
+
+            finalizedTxInput = inputScriptType.addMultisigSpendingInput(PolicyType.MULTI_HD, transaction, utxo, inputThreshold, pubKeySignatures);
+        } else if(inputThreshold == 1) {
+            ECKey pubKey;
+            TransactionSignature signature;
+            PolicyType policyType;
+            if(psbtInput.isTaproot()) {
+                //The witness program is the tweaked output key - pass it as SINGLE_SP so getOutputKey does not tweak again
+                policyType = PolicyType.SINGLE_SP;
+                pubKey = P2TR.getPublicKeyFromScript(utxo.getScript());
+                signature = psbtInput.getTapKeyPathSignature();
+            } else if(psbtInput.getPartialSignatures().size() == 1) {
+                policyType = PolicyType.SINGLE_HD;
+                Map.Entry<ECKey, TransactionSignature> entry = psbtInput.getPartialSignatures().entrySet().iterator().next();
+                pubKey = entry.getKey();
+                signature = entry.getValue();
+            } else {
+                return;
+            }
+
+            if(signature == null) {
+                return;
+            }
+
+            finalizedTxInput = inputScriptType.addSpendingInput(policyType, transaction, utxo, pubKey, signature);
+        } else {
+            return;
+        }
+
+        psbtInput.setFinalScriptSig(finalizedTxInput.getScriptSig());
+        psbtInput.setFinalScriptWitness(finalizedTxInput.getWitness());
+        psbtInput.clearNonFinalFields();
     }
 
     public BitcoinUnit getAutoUnit() {
@@ -1862,16 +2335,28 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
         int numSigs;
         try {
             numSigs = defaultPolicy.getNumSignaturesRequired();
-        } catch (Exception e) {
+        } catch(Exception e) {
             throw new InvalidWalletException("Cannot determine number of required signatures to sign a transaction");
         }
 
-        if(policyType.equals(PolicyType.SINGLE) && (numSigs != 1 || keystores.size() != 1)) {
+        if((policyType.equals(PolicyType.SINGLE_HD) || policyType.equals(PolicyType.SINGLE_SP)) && (numSigs != 1 || keystores.size() != 1)) {
             throw new InvalidWalletException(policyType + " wallet needs " + numSigs + " and has " + keystores.size() + " keystores");
         }
 
-        if(policyType.equals(PolicyType.MULTI) && (numSigs < 1 || numSigs > keystores.size())) {
+        if(policyType.equals(PolicyType.MULTI_HD) && (numSigs < 1 || numSigs > keystores.size())) {
             throw new InvalidWalletException(policyType + " wallet needs " + numSigs + " and has " + keystores.size() + " keystores");
+        }
+
+        if(policyType.equals(PolicyType.MULTI_HD) && keystores.size() > scriptType.getMaxCosigners()) {
+            throw new InvalidWalletException(scriptType.getName() + " wallets support a maximum of " + scriptType.getMaxCosigners() + " cosigners, but this wallet has " + keystores.size());
+        }
+
+        if(policyType.equals(PolicyType.SINGLE_HD) && keystores.getFirst().getExtendedPublicKey() == null) {
+            throw new InvalidWalletException(policyType + " wallet needs an extended public key");
+        }
+
+        if(policyType.equals(PolicyType.SINGLE_SP) && keystores.getFirst().getSilentPaymentScanAddress() == null) {
+            throw new InvalidWalletException(policyType + " wallet needs a silent payment scan address");
         }
 
         if(containsDuplicateKeystoreLabels()) {
@@ -1940,7 +2425,14 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
             return false;
         }
 
-        return !keystores.stream().map(Keystore::getExtendedPublicKey).allMatch(new HashSet<>()::add);
+        for(int i = 0; i < keystores.size(); i++) {
+            ExtendedKey extendedPublicKey = keystores.get(i).getExtendedPublicKey();
+            if(extendedPublicKey != null && keystores.subList(i + 1, keystores.size()).stream().anyMatch(k -> extendedPublicKey.hasSameKey(k.getExtendedPublicKey()))) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public List<Keystore> makeLabelsUnique(Keystore newKeystore) {
@@ -1969,7 +2461,7 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
                     try {
                         int count = Integer.parseInt(remainder.trim());
                         max = Math.max(max, count);
-                    } catch (NumberFormatException e) {
+                    } catch(NumberFormatException e) {
                         //ignore, no terminating number
                     }
                 }
@@ -2026,10 +2518,13 @@ public class Wallet extends Persistable implements Comparable<Wallet> {
         }
         copy.setWalletConfig(walletConfig == null ? null : walletConfig.copy());
         copy.setMixConfig(mixConfig == null ? null : mixConfig.copy());
+        copy.walletTables.putAll(walletTables);
         copy.setStoredBlockHeight(getStoredBlockHeight());
         copy.gapLimit = gapLimit;
         copy.watchLast = watchLast;
         copy.birthDate = birthDate;
+        copy.birthHeight = birthHeight;
+        copy.silentPaymentAddresses.putAll(silentPaymentAddresses);
 
         return copy;
     }

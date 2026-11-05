@@ -9,12 +9,11 @@ import com.sparrowwallet.drongo.bip47.PaymentCode;
 import com.sparrowwallet.drongo.crypto.*;
 import com.sparrowwallet.drongo.policy.PolicyType;
 import com.sparrowwallet.drongo.protocol.ScriptType;
+import com.sparrowwallet.drongo.silentpayments.SilentPaymentScanAddress;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
+import java.util.*;
 
 public class Keystore extends Persistable {
     private static final Logger log = LoggerFactory.getLogger(Keystore.class);
@@ -28,6 +27,7 @@ public class Keystore extends Persistable {
     private KeyDerivation keyDerivation;
     private ExtendedKey extendedPublicKey;
     private PaymentCode externalPaymentCode;
+    private SilentPaymentScanAddress silentPaymentScanAddress;
     private byte[] deviceRegistration;
     private MasterPrivateExtendedKey masterPrivateExtendedKey;
     private DeterministicSeed seed;
@@ -37,6 +37,7 @@ public class Keystore extends Persistable {
 
     //Avoid performing repeated expensive seed derivation checks
     private transient boolean extendedPublicKeyChecked;
+    private transient boolean silentPaymentScanAddressChecked;
 
     public Keystore() {
         this(DEFAULT_LABEL);
@@ -58,7 +59,8 @@ public class Keystore extends Persistable {
     }
 
     public String getScriptName() {
-        return label.replace(" ", "");
+        String scriptName = label.replaceAll("[^\\p{L}\\p{N}]", "");
+        return scriptName.isEmpty() ? "Keystore" : scriptName;
     }
 
     public void setLabel(String label) {
@@ -104,6 +106,15 @@ public class Keystore extends Persistable {
 
     public void setExternalPaymentCode(PaymentCode paymentCode) {
         this.externalPaymentCode = paymentCode;
+    }
+
+    public SilentPaymentScanAddress getSilentPaymentScanAddress() {
+        return silentPaymentScanAddress;
+    }
+
+    public void setSilentPaymentScanAddress(SilentPaymentScanAddress silentPaymentScanAddress) {
+        this.silentPaymentScanAddress = silentPaymentScanAddress;
+        this.silentPaymentScanAddressChecked = false;
     }
 
     public byte[] getDeviceRegistration() {
@@ -219,6 +230,18 @@ public class Keystore extends Persistable {
     }
 
     public ECKey getKey(WalletNode walletNode) throws MnemonicException {
+        if(silentPaymentScanAddress != null && walletNode.getWallet().getPolicyType() == PolicyType.SINGLE_SP) {
+            ECKey spendPrivKey = getSpendPrivateKey(Collections.emptyMap());
+            byte[] tweak = walletNode.getSilentPaymentTweak();
+            if(tweak == null) {
+                if(walletNode.isPurposeNode()) {
+                    return spendPrivKey;
+                }
+                throw new IllegalStateException("Silent payment tweak is required for address node " + walletNode.getDerivationPath());
+            }
+            return spendPrivKey.addPrivate(ECKey.fromPrivate(tweak));
+        }
+
         if(source == KeystoreSource.SW_PAYMENT_CODE) {
             try {
                 if(walletNode.getKeyPurpose() != KeyPurpose.RECEIVE) {
@@ -242,6 +265,19 @@ public class Keystore extends Persistable {
     }
 
     public ECKey getPubKey(WalletNode walletNode) {
+        if(silentPaymentScanAddress != null && walletNode.getWallet().getPolicyType() == PolicyType.SINGLE_SP) {
+            ECKey spendKey = silentPaymentScanAddress.getSpendKey();
+            byte[] tweak = walletNode.getSilentPaymentTweak();
+            if(tweak == null) {
+                if(walletNode.isPurposeNode()) {
+                    return spendKey;
+                }
+                throw new IllegalStateException("Silent payment tweak is required for address node " + walletNode.getDerivationPath());
+            }
+            ECKey tweakPoint = ECKey.fromPublicOnly(ECKey.fromPrivate(tweak));
+            return spendKey.add(tweakPoint, true);
+        }
+
         if(source == KeystoreSource.SW_PAYMENT_CODE) {
             try {
                 PaymentAddress paymentAddress = getPaymentAddress(walletNode.getKeyPurpose(), walletNode.getIndex());
@@ -264,7 +300,7 @@ public class Keystore extends Persistable {
     }
 
     public ECKey getPubKeyForDerivation(KeyDerivation keyDerivation) {
-        if(keyDerivation != null) {
+        if(keyDerivation != null && extendedPublicKey != null) {
             List<ChildNumber> derivation = keyDerivation.getDerivation();
             String fingerprint = Utils.bytesToHex(this.extendedPublicKey.getKey().getFingerprint());
             if(derivation.size() > this.keyDerivation.getDerivation().size()) {
@@ -281,6 +317,33 @@ public class Keystore extends Persistable {
         }
 
         return null;
+    }
+
+    public ECKey getSpendPrivateKey(Map<ECKey, KeyDerivation> spendDerivations) throws MnemonicException {
+        String masterFingerprint = getKeyDerivation().getMasterFingerprint();
+        for(Map.Entry<ECKey, KeyDerivation> entry : spendDerivations.entrySet()) {
+            if(masterFingerprint.equals(entry.getValue().getMasterFingerprint())) {
+                DeterministicKey derivedKey = getExtendedMasterPrivateKey().getKey(entry.getValue().getDerivation());
+                ECKey spendPrivKey = ECKey.fromPrivate(derivedKey.getPrivKeyBytes(), true);
+
+                if(!Arrays.equals(spendPrivKey.getPubKey(), entry.getKey().getPubKey())) {
+                    throw new IllegalStateException("Derived spend private key does not match PSBT spend public key");
+                }
+
+                return spendPrivKey;
+            }
+        }
+
+        List<ChildNumber> spendDerivation = KeyDerivation.getBip352SpendDerivation(getKeyDerivation().getDerivation());
+        DeterministicKey derivedKey = getExtendedMasterPrivateKey().getKey(spendDerivation);
+        ECKey spendPrivKey = ECKey.fromPrivate(derivedKey.getPrivKeyBytes(), true);
+
+        ECKey expectedSpendPubKey = getSilentPaymentScanAddress().getSpendKey();
+        if(!Arrays.equals(spendPrivKey.getPubKey(), expectedSpendPubKey.getPubKey())) {
+            throw new IllegalStateException("Derived spend private key does not match keystore spend public key");
+        }
+
+        return spendPrivKey;
     }
 
     public boolean isValid() {
@@ -310,8 +373,8 @@ public class Keystore extends Persistable {
             throw new InvalidKeystoreException("No key derivation specified");
         }
 
-        if(extendedPublicKey == null) {
-            throw new InvalidKeystoreException("No extended public key specified");
+        if(extendedPublicKey == null && silentPaymentScanAddress == null) {
+            throw new InvalidKeystoreException("No extended public key or silent payment scan address specified");
         }
 
         if(label.isEmpty()) {
@@ -335,7 +398,7 @@ public class Keystore extends Persistable {
                 throw new InvalidKeystoreException("Source of " + source + " but no seed or master private key is present");
             }
 
-            if(!extendedPublicKeyChecked && ((seed != null && !seed.isEncrypted()) || (masterPrivateExtendedKey != null && !masterPrivateExtendedKey.isEncrypted()))) {
+            if(!extendedPublicKeyChecked && extendedPublicKey != null && ((seed != null && !seed.isEncrypted()) || (masterPrivateExtendedKey != null && !masterPrivateExtendedKey.isEncrypted()))) {
                 try {
                     List<ChildNumber> derivation = getKeyDerivation().getDerivation();
                     DeterministicKey derivedKey = getExtendedMasterPrivateKey().getKey(derivation);
@@ -345,6 +408,21 @@ public class Keystore extends Persistable {
                         throw new InvalidKeystoreException("Specified extended public key does not match public key derived from seed");
                     }
                     extendedPublicKeyChecked = true;
+                } catch(MnemonicException e) {
+                    throw new InvalidKeystoreException("Invalid mnemonic specified for seed", e);
+                }
+            }
+
+            if(!silentPaymentScanAddressChecked && silentPaymentScanAddress != null && ((seed != null && !seed.isEncrypted()) || (masterPrivateExtendedKey != null && !masterPrivateExtendedKey.isEncrypted()))) {
+                try {
+                    List<ChildNumber> derivation = getKeyDerivation().getDerivation();
+                    DeterministicKey derivedScanKey = getExtendedMasterPrivateKey().getKey(KeyDerivation.getBip352ScanDerivation(derivation));
+                    DeterministicKey derivedSpendKey = getExtendedMasterPrivateKey().getKey(KeyDerivation.getBip352SpendDerivation(derivation));
+                    SilentPaymentScanAddress derivedScanAddress = new SilentPaymentScanAddress(derivedScanKey, derivedSpendKey);
+                    if(!derivedScanAddress.equals(getSilentPaymentScanAddress())) {
+                        throw new InvalidKeystoreException("Specified silent payments scan address does not match scan and spend keys derived from seed");
+                    }
+                    silentPaymentScanAddressChecked = true;
                 } catch(MnemonicException e) {
                     throw new InvalidKeystoreException("Invalid mnemonic specified for seed", e);
                 }
@@ -385,43 +463,54 @@ public class Keystore extends Persistable {
         if(bip47ExtendedPrivateKey != null) {
             copy.setBip47ExtendedPrivateKey(bip47ExtendedPrivateKey.copy());
         }
+        if(silentPaymentScanAddress != null) {
+            copy.setSilentPaymentScanAddress(silentPaymentScanAddress.copy());
+        }
         return copy;
     }
 
-    public static Keystore fromSeed(DeterministicSeed seed, List<ChildNumber> derivation) throws MnemonicException {
+    public static Keystore fromSeed(DeterministicSeed seed, PolicyType policyType, List<ChildNumber> derivation) throws MnemonicException {
         Keystore keystore = new Keystore();
         keystore.setSeed(seed);
         keystore.setLabel(seed.getType().name());
-        rederiveKeystoreFromMaster(keystore, derivation);
+        rederiveKeystoreFromMaster(keystore, policyType, derivation);
         return keystore;
     }
 
-    public static Keystore fromMasterPrivateExtendedKey(MasterPrivateExtendedKey masterPrivateExtendedKey, List<ChildNumber> derivation) throws MnemonicException {
+    public static Keystore fromMasterPrivateExtendedKey(MasterPrivateExtendedKey masterPrivateExtendedKey, PolicyType policyType, List<ChildNumber> derivation) throws MnemonicException {
         Keystore keystore = new Keystore();
         keystore.setMasterPrivateExtendedKey(masterPrivateExtendedKey);
         keystore.setLabel("Master Key");
-        rederiveKeystoreFromMaster(keystore, derivation);
+        rederiveKeystoreFromMaster(keystore, policyType, derivation);
         return keystore;
     }
 
-    private static void rederiveKeystoreFromMaster(Keystore keystore, List<ChildNumber> derivation) throws MnemonicException {
+    private static void rederiveKeystoreFromMaster(Keystore keystore, PolicyType policyType, List<ChildNumber> derivation) throws MnemonicException {
         ExtendedKey xprv = keystore.getExtendedMasterPrivateKey();
         String masterFingerprint = Utils.bytesToHex(xprv.getKey().getFingerprint());
-        DeterministicKey derivedKey = xprv.getKey(derivation);
-        DeterministicKey derivedKeyPublicOnly = derivedKey.dropPrivateBytes().dropParent();
-        ExtendedKey xpub = new ExtendedKey(derivedKeyPublicOnly, derivedKey.getParentFingerprint(), derivation.isEmpty() ? ChildNumber.ZERO : derivation.get(derivation.size() - 1));
 
         keystore.setSource(KeystoreSource.SW_SEED);
         keystore.setWalletModel(WalletModel.SPARROW);
         keystore.setKeyDerivation(new KeyDerivation(masterFingerprint, KeyDerivation.writePath(derivation)));
-        keystore.setExtendedPublicKey(ExtendedKey.fromDescriptor(xpub.toString()));
 
-        int account = ScriptType.getScriptTypesForPolicyType(PolicyType.SINGLE).stream()
-                .mapToInt(scriptType -> scriptType.getAccount(keystore.getKeyDerivation().getDerivationPath())).filter(idx -> idx > -1).findFirst().orElse(0);
-        List<ChildNumber> bip47Derivation = KeyDerivation.getBip47Derivation(account);
-        DeterministicKey bip47Key = xprv.getKey(bip47Derivation);
-        ExtendedKey bip47ExtendedPrivateKey = new ExtendedKey(bip47Key, bip47Key.getParentFingerprint(), bip47Derivation.get(bip47Derivation.size() - 1));
-        keystore.setBip47ExtendedPrivateKey(ExtendedKey.fromDescriptor(bip47ExtendedPrivateKey.toString()));
+        if(policyType == PolicyType.SINGLE_SP) {
+            DeterministicKey scanKey = xprv.getKey(KeyDerivation.getBip352ScanDerivation(derivation));
+            DeterministicKey spendKey = xprv.getKey(KeyDerivation.getBip352SpendDerivation(derivation));
+            SilentPaymentScanAddress spScanAddress = new SilentPaymentScanAddress(ECKey.fromPrivate(scanKey.getPrivKey()), ECKey.fromPublicOnly(spendKey));
+            keystore.setSilentPaymentScanAddress(spScanAddress);
+        } else {
+            DeterministicKey derivedKey = xprv.getKey(derivation);
+            DeterministicKey derivedKeyPublicOnly = derivedKey.dropPrivateBytes().dropParent();
+            ExtendedKey xpub = new ExtendedKey(derivedKeyPublicOnly, derivedKey.getParentFingerprint(), derivation.isEmpty() ? ChildNumber.ZERO : derivation.get(derivation.size() - 1));
+            keystore.setExtendedPublicKey(ExtendedKey.fromDescriptor(xpub.toString()));
+
+            int account = ScriptType.getScriptTypesForPolicyType(PolicyType.SINGLE_HD).stream()
+                    .mapToInt(scriptType -> scriptType.getAccount(keystore.getKeyDerivation().getDerivationPath())).filter(idx -> idx > -1).findFirst().orElse(0);
+            List<ChildNumber> bip47Derivation = KeyDerivation.getBip47Derivation(account);
+            DeterministicKey bip47Key = xprv.getKey(bip47Derivation);
+            ExtendedKey bip47ExtendedPrivateKey = new ExtendedKey(bip47Key, bip47Key.getParentFingerprint(), bip47Derivation.get(bip47Derivation.size() - 1));
+            keystore.setBip47ExtendedPrivateKey(ExtendedKey.fromDescriptor(bip47ExtendedPrivateKey.toString()));
+        }
     }
 
     public boolean isEncrypted() {

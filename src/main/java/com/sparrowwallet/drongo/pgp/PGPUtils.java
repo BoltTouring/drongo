@@ -20,6 +20,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -30,8 +31,9 @@ public class PGPUtils {
     public static final String APPLICATION_KEYRING_DIR = "gpg/";
     public static final String PUBRING_GPG = "pubring.gpg";
     public static final String PUBRING_KBX = "pubring.kbx";
+    private static final String ARMORED_MESSAGE_HEADER = "-----BEGIN PGP MESSAGE-----";
 
-    public static PGPVerificationResult verify(InputStream publicKeyStream, InputStream contentStream, InputStream detachedSignatureStream) throws IOException, PGPVerificationException {
+    public static PGPVerificationResult verify(InputStream publicKeyStream, InputStream contentStream, InputStream detachedSignatureStream, OutputStream signedContentStream) throws IOException, PGPVerificationException {
         PGPPublicKeyRing publicKeyRing = null;
         if(publicKeyStream != null) {
             publicKeyRing = PGPainless.readKeyRing().publicKeyRing(publicKeyStream);
@@ -60,7 +62,11 @@ public class PGPUtils {
                     .onInputStream(contentStream)
                     .withOptions(options);
 
-            Streams.drain(verificationStream);
+            if(signedContentStream != null) {
+                Streams.pipeAll(verificationStream, signedContentStream);
+            } else {
+                Streams.drain(verificationStream);
+            }
             verificationStream.close();
 
             MessageMetadata result = verificationStream.getMetadata();
@@ -127,10 +133,16 @@ public class PGPUtils {
         try {
             String[] keyFiles = IOUtils.getResourceListing(PGPUtils.class, APPLICATION_KEYRING_DIR);
             for(String keyFile : keyFiles) {
+                //A resource that is not a public key ring must not add a null to the collection, or remove the keys following it
                 try(InputStream pubkeyStream = PGPUtils.class.getResourceAsStream("/" + APPLICATION_KEYRING_DIR + keyFile)) {
-                    if(pubkeyStream != null) {
-                        rings.add(PGPainless.readKeyRing().publicKeyRing(pubkeyStream));
+                    PGPPublicKeyRing publicKeyRing = pubkeyStream == null ? null : PGPainless.readKeyRing().publicKeyRing(pubkeyStream);
+                    if(publicKeyRing != null) {
+                        rings.add(publicKeyRing);
+                    } else {
+                        log.warn("Ignoring " + keyFile + " in " + APPLICATION_KEYRING_DIR + ", not a public key ring");
                     }
+                } catch(Exception e) {
+                    log.warn("Error loading application key ring " + keyFile, e);
                 }
             }
         } catch(Exception e) {
@@ -150,7 +162,10 @@ public class PGPUtils {
                     List<PGPPublicKeyRing> rings = new ArrayList<>();
                     for(KeyBlob keyBlob : bcKeyBox.getKeyBlobs()) {
                         if(keyBlob instanceof PublicKeyRingBlob publicKeyRingBlob) {
-                            rings.add(publicKeyRingBlob.getPGPPublicKeyRing());
+                            PGPPublicKeyRing publicKeyRing = publicKeyRingBlob.getPGPPublicKeyRing();
+                            if(publicKeyRing != null) {
+                                rings.add(publicKeyRing);
+                            }
                         }
                     }
                     if(!rings.isEmpty()) {
@@ -200,7 +215,8 @@ public class PGPUtils {
 
             if(openPgpInputStream.isAsciiArmored()) {
                 ArmoredInputStream armorIn = ArmoredInputStreamFactory.get(openPgpInputStream);
-                if(armorIn.isClearText()) {
+                String armorHeaderLine = armorIn.getArmorHeaderLine();
+                if(armorIn.isClearText() || (armorHeaderLine != null && ARMORED_MESSAGE_HEADER.equals(armorHeaderLine.strip()))) {
                     return true;
                 }
             }

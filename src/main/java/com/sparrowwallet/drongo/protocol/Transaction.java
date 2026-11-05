@@ -3,12 +3,14 @@ package com.sparrowwallet.drongo.protocol;
 import com.sparrowwallet.drongo.Utils;
 import com.sparrowwallet.drongo.address.Address;
 import com.sparrowwallet.drongo.crypto.ECKey;
+import com.sparrowwallet.drongo.policy.PolicyType;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.math.BigInteger;
 import java.util.*;
+import java.util.function.Function;
 
 import static com.sparrowwallet.drongo.Utils.uint32ToByteStreamLE;
 import static com.sparrowwallet.drongo.Utils.uint64ToByteStreamLE;
@@ -17,6 +19,7 @@ public class Transaction extends ChildMessage {
     public static final int MAX_BLOCK_SIZE_VBYTES = 1000 * 1000;
     public static final long MAX_BITCOIN = 21 * 1000 * 1000L;
     public static final long SATOSHIS_PER_BITCOIN = 100 * 1000 * 1000L;
+    public static final long MAX_SATOSHIS = MAX_BITCOIN * SATOSHIS_PER_BITCOIN;
     public static final long MAX_BLOCK_LOCKTIME = 500000000L;
     public static final int WITNESS_SCALE_FACTOR = 4;
     public static final int DEFAULT_SEGWIT_FLAG = 1;
@@ -51,6 +54,9 @@ public class Transaction extends ChildMessage {
 
     public Transaction(byte[] rawtx) {
         super(rawtx, 0);
+        if(length != rawtx.length) {
+            throw new ProtocolException("Transaction of " + length + " bytes is followed by " + (rawtx.length - length) + " unparsed bytes");
+        }
     }
 
     public Transaction(byte[] blockdata, int offset) {
@@ -74,7 +80,9 @@ public class Transaction extends ChildMessage {
     }
 
     public boolean isLocktimeEnabled() {
-        if(locktime == 0) return false;
+        if(locktime == 0) {
+            return false;
+        }
         return isLocktimeSequenceEnabled();
     }
 
@@ -128,7 +136,7 @@ public class Transaction extends ChildMessage {
         ByteArrayOutputStream stream = new UnsafeByteArrayOutputStream(length < 32 ? 32 : length + 32);
         try {
             bitcoinSerializeToStream(stream, useWitnesses);
-        } catch (IOException e) {
+        } catch(IOException e) {
             throw new RuntimeException(e); // cannot happen
         }
         return Sha256Hash.wrapReversed(Sha256Hash.hashTwice(stream.toByteArray()));
@@ -188,7 +196,7 @@ public class Transaction extends ChildMessage {
             ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
             bitcoinSerializeToStream(outputStream, useWitnessFormat);
             return outputStream.toByteArray();
-        } catch (IOException e) {
+        } catch(IOException e) {
             //can't happen
         }
 
@@ -252,10 +260,13 @@ public class Transaction extends ChildMessage {
         // version
         version = readUint32();
         // peek at marker
+        if(cursor >= payload.length) {
+            throw new ProtocolException("Transaction is truncated, no bytes remain to read the segwit marker");
+        }
         byte marker = payload[cursor];
         segwit = (marker == 0);
         // marker, flag
-        if (segwit) {
+        if(segwit) {
             byte[] segwitHeader = readBytes(2);
             segwitFlag = segwitHeader[1];
         }
@@ -264,8 +275,9 @@ public class Transaction extends ChildMessage {
         // txout_count, txouts
         parseOutputs();
         // script_witnesses
-        if (segwit)
+        if(segwit) {
             parseWitnesses();
+        }
         // lock_time
         locktime = readUint32();
 
@@ -274,8 +286,11 @@ public class Transaction extends ChildMessage {
 
     private void parseInputs() {
         long numInputs = readVarInt();
-        inputs = new ArrayList<>(Math.min((int) numInputs, Utils.MAX_INITIAL_ARRAY_LENGTH));
-        for (long i = 0; i < numInputs; i++) {
+        if(numInputs < 0) {
+            throw new ProtocolException("Invalid input count: " + numInputs);
+        }
+        inputs = new ArrayList<>((int)Math.min(numInputs, Utils.MAX_INITIAL_ARRAY_LENGTH));
+        for(long i = 0; i < numInputs; i++) {
             TransactionInput input = new TransactionInput(this, payload, cursor);
             inputs.add(input);
             long scriptLen = readVarInt(TransactionOutPoint.MESSAGE_LENGTH);
@@ -285,8 +300,11 @@ public class Transaction extends ChildMessage {
 
     private void parseOutputs() {
         long numOutputs = readVarInt();
-        outputs = new ArrayList<>(Math.min((int) numOutputs, Utils.MAX_INITIAL_ARRAY_LENGTH));
-        for (long i = 0; i < numOutputs; i++) {
+        if(numOutputs < 0) {
+            throw new ProtocolException("Invalid output count: " + numOutputs);
+        }
+        outputs = new ArrayList<>((int)Math.min(numOutputs, Utils.MAX_INITIAL_ARRAY_LENGTH));
+        for(long i = 0; i < numOutputs; i++) {
             TransactionOutput output = new TransactionOutput(this, payload, cursor);
             outputs.add(output);
             long scriptLen = readVarInt(8);
@@ -296,7 +314,7 @@ public class Transaction extends ChildMessage {
 
     private void parseWitnesses() {
         int numWitnesses = inputs.size();
-        for (int i = 0; i < numWitnesses; i++) {
+        for(int i = 0; i < numWitnesses; i++) {
             TransactionWitness witness = new TransactionWitness(this, payload, cursor);
             inputs.get(i).witness(witness);
             cursor += witness.getLength();
@@ -322,16 +340,18 @@ public class Transaction extends ChildMessage {
         }
         // txin_count, txins
         wu += new VarInt(inputs.size()).getSizeInBytes() * WITNESS_SCALE_FACTOR;
-        for (TransactionInput in : inputs)
+        for(TransactionInput in : inputs) {
             wu += in.length * WITNESS_SCALE_FACTOR;
+        }
         // txout_count, txouts
         wu += new VarInt(outputs.size()).getSizeInBytes() * WITNESS_SCALE_FACTOR;
-        for (TransactionOutput out : outputs)
+        for(TransactionOutput out : outputs) {
             wu += out.length * WITNESS_SCALE_FACTOR;
+        }
         // script_witnesses
         if(isSegwit()) {
-            for (TransactionInput in : inputs) {
-                if (in.hasWitness()) {
+            for(TransactionInput in : inputs) {
+                if(in.hasWitness()) {
                     wu += in.getWitness().getLength();
                 }
             }
@@ -340,6 +360,39 @@ public class Transaction extends ChildMessage {
         wu += 4 * WITNESS_SCALE_FACTOR;
 
         return wu;
+    }
+
+    /**
+     * Calculates the fee this transaction pays from the transactions funding its inputs, which is the only way to know it: a transaction does not carry
+     * its own fee, and a fee supplied alongside one is an assertion by whoever supplied it.
+     *
+     * @param inputTransactions a lookup from txid to the transaction funding one of this transaction's inputs, returning null for one it does not have
+     * @return the fee in satoshis, or null where a funding transaction is absent or the amounts do not add up
+     */
+    public Long getFee(Function<Sha256Hash, Transaction> inputTransactions) {
+        if(isCoinBase()) {
+            return 0L;
+        }
+
+        try {
+            long fee = 0L;
+            for(TransactionInput input : inputs) {
+                Transaction inputTransaction = inputTransactions.apply(input.getOutpoint().getHash());
+                if(inputTransaction == null || input.getOutpoint().getIndex() >= inputTransaction.getOutputs().size()) {
+                    return null;
+                }
+
+                fee = Math.addExact(fee, inputTransaction.getOutputs().get((int)input.getOutpoint().getIndex()).getValue());
+            }
+
+            for(TransactionOutput output : outputs) {
+                fee = Math.subtractExact(fee, output.getValue());
+            }
+
+            return fee < 0 ? null : fee;
+        } catch(ArithmeticException e) {
+            return null;
+        }
     }
 
     public List<TransactionInput> getInputs() {
@@ -386,7 +439,7 @@ public class Transaction extends ChildMessage {
     }
 
     public TransactionOutput addOutput(long value, ECKey pubkey) {
-        return addOutput(new TransactionOutput(this, value, ScriptType.P2PK.getOutputScript(pubkey)));
+        return addOutput(new TransactionOutput(this, value, ScriptType.P2PK.getOutputScript(PolicyType.SINGLE_HD, pubkey)));
     }
 
     public TransactionOutput addOutput(TransactionOutput output) {
@@ -397,41 +450,51 @@ public class Transaction extends ChildMessage {
     }
 
     public void verify() throws VerificationException {
-        if (inputs.size() == 0 || outputs.size() == 0)
+        if(inputs.size() == 0 || outputs.size() == 0) {
             throw new VerificationException.EmptyInputsOrOutputs();
-        if (this.getMessageSize() > (MAX_BLOCK_SIZE_VBYTES * WITNESS_SCALE_FACTOR))
+        }
+        if(this.getMessageSize() > (MAX_BLOCK_SIZE_VBYTES * WITNESS_SCALE_FACTOR)) {
             throw new VerificationException.LargerThanMaxBlockSize();
+        }
 
         HashSet<TransactionOutPoint> outpoints = new HashSet<>();
-        for (TransactionInput input : inputs) {
-            if (outpoints.contains(input.getOutpoint()))
+        for(TransactionInput input : inputs) {
+            if(outpoints.contains(input.getOutpoint())) {
                 throw new VerificationException.DuplicatedOutPoint();
+            }
             outpoints.add(input.getOutpoint());
         }
 
         long valueOut = 0L;
-        for (TransactionOutput output : outputs) {
+        for(TransactionOutput output : outputs) {
             long value = output.getValue();
-            if (value < 0)
+            if(value < 0) {
                 throw new VerificationException.NegativeValueOutput();
+            }
             try {
                 valueOut = Math.addExact(valueOut, value);
-            } catch (ArithmeticException e) {
+            } catch(ArithmeticException e) {
                 throw new VerificationException.ExcessiveValue();
             }
-            double bitcoin = (double)value/SATOSHIS_PER_BITCOIN;
-            if (bitcoin > MAX_BITCOIN) {
+            if(value > MAX_SATOSHIS) {
                 throw new VerificationException.ExcessiveValue();
             }
         }
 
-        if (isCoinBase()) {
-            if (inputs.get(0).getScriptBytes().length < 2 || inputs.get(0).getScriptBytes().length > 100)
+        if(valueOut > MAX_SATOSHIS) {
+            throw new VerificationException.ExcessiveValue();
+        }
+
+        if(isCoinBase()) {
+            if(inputs.get(0).getScriptBytes().length < 2 || inputs.get(0).getScriptBytes().length > 100) {
                 throw new VerificationException.CoinbaseScriptSizeOutOfRange();
+            }
         } else {
-            for (TransactionInput input : inputs)
-                if (input.isCoinBase())
+            for(TransactionInput input : inputs) {
+                if(input.isCoinBase()) {
                     throw new VerificationException.UnexpectedCoinbaseInput();
+                }
+            }
         }
     }
 
@@ -468,7 +531,7 @@ public class Transaction extends ChildMessage {
             // Clear input scripts in preparation for signing. If we're signing a fresh
             // transaction that step isn't very helpful, but it doesn't add much cost relative to the actual
             // EC math so we'll do it anyway.
-            for (int i = 0; i < tx.inputs.size(); i++) {
+            for(int i = 0; i < tx.inputs.size(); i++) {
                 TransactionInput input = tx.inputs.get(i);
                 input.clearScriptBytes();
             }
@@ -538,7 +601,7 @@ public class Transaction extends ChildMessage {
             bos.close();
 
             return hash;
-        } catch (IOException e) {
+        } catch(IOException e) {
             throw new RuntimeException(e);  // Cannot happen.
         }
     }
@@ -546,13 +609,13 @@ public class Transaction extends ChildMessage {
     /**
      * <p>Calculates a signature hash, that is, a hash of a simplified form of the transaction. How exactly the transaction
      * is simplified is specified by the type and anyoneCanPay parameters.</p>
-     *
+     * <p>
      * (See BIP143: https://github.com/bitcoin/bips/blob/master/bip-0143.mediawiki)</p>
      *
-     * @param inputIndex   input the signature is being calculated for. Tx signatures are always relative to an input.
-     * @param scriptCode   the script that should be in the given input during signing.
-     * @param prevValue    the value of the coin being spent
-     * @param sigHash      Should usually be SigHash.ALL
+     * @param inputIndex input the signature is being calculated for. Tx signatures are always relative to an input.
+     * @param scriptCode the script that should be in the given input during signing.
+     * @param prevValue  the value of the coin being spent
+     * @param sigHash    Should usually be SigHash.ALL
      */
     public synchronized Sha256Hash hashForWitnessSignature(int inputIndex, Script scriptCode, long prevValue, SigHash sigHash) {
         return hashForWitnessSignature(inputIndex, scriptCode.getProgram(), prevValue, sigHash.value);
@@ -614,7 +677,7 @@ public class Transaction extends ChildMessage {
             bos.write(hashOutputs);
             uint32ToByteStreamLE(this.locktime, bos);
             uint32ToByteStreamLE(0x000000ff & sigHashType, bos);
-        } catch (IOException e) {
+        } catch(IOException e) {
             throw new RuntimeException(e);  // Cannot happen.
         }
 
@@ -624,15 +687,15 @@ public class Transaction extends ChildMessage {
     /**
      * <p>Calculates a signature hash, that is, a hash of a simplified form of the transaction. How exactly the transaction
      * is simplified is specified by the type and anyoneCanPay parameters.</p>
-     *
+     * <p>
      * (See BIP341: https://github.com/bitcoin/bips/blob/master/bip-0341.mediawiki)</p>
      *
-     * @param spentUtxos   the ordered list of spent UTXOs corresponding to the inputs of this transaction
-     * @param inputIndex   input the signature is being calculated for. Tx signatures are always relative to an input.
-     * @param scriptPath   whether we are signing for the keypath or the scriptpath
-     * @param script       if signing for the scriptpath, the script to sign
-     * @param sigHash      should usually be SigHash.ALL
-     * @param annex        annex data
+     * @param spentUtxos the ordered list of spent UTXOs corresponding to the inputs of this transaction
+     * @param inputIndex input the signature is being calculated for. Tx signatures are always relative to an input.
+     * @param scriptPath whether we are signing for the keypath or the scriptpath
+     * @param script     if signing for the scriptpath, the script to sign
+     * @param sigHash    should usually be SigHash.ALL
+     * @param annex      annex data
      */
     public synchronized Sha256Hash hashForTaprootSignature(List<TransactionOutput> spentUtxos, int inputIndex, boolean scriptPath, Script script, SigHash sigHash, byte[] annex) {
         return hashForTaprootSignature(spentUtxos, inputIndex, scriptPath, script, sigHash.value, annex);
@@ -733,7 +796,7 @@ public class Transaction extends ChildMessage {
             }
 
             return Sha256Hash.wrap(Utils.taggedHash("TapSighash", msgBytes));
-        } catch (IOException e) {
+        } catch(IOException e) {
             throw new RuntimeException(e);  // Cannot happen.
         }
     }

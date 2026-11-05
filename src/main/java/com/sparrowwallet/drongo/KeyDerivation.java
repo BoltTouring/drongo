@@ -65,12 +65,18 @@ public class KeyDerivation {
         }
 
         String[] parsedNodes = path.replace("M", "").replace("m", "").split("/");
-        for (String n : parsedNodes) {
+        for(String n : parsedNodes) {
             n = n.replaceAll(" ", "");
-            if (n.length() == 0) continue;
+            if(n.length() == 0) {
+                continue;
+            }
             boolean isHard = n.endsWith("H") || n.endsWith("h") || n.endsWith("'");
-            if (isHard) n = n.substring(0, n.length() - 1);
-            if (n.equals("*")) n = Integer.toString(wildcardReplacement);
+            if(isHard) {
+                n = n.substring(0, n.length() - 1);
+            }
+            if(n.equals("*")) {
+                n = Integer.toString(wildcardReplacement);
+            }
             int nodeNumber = Integer.parseInt(n);
             nodes.add(new ChildNumber(nodeNumber, isHard));
         }
@@ -84,7 +90,7 @@ public class KeyDerivation {
 
     public static String writePath(List<ChildNumber> pathList, boolean useApostrophes) {
         StringBuilder path = new StringBuilder("m");
-        for(ChildNumber child: pathList) {
+        for(ChildNumber child : pathList) {
             path.append("/");
             path.append(child.toString(useApostrophes));
         }
@@ -95,7 +101,7 @@ public class KeyDerivation {
     public static boolean isValid(String derivationPath) {
         try {
             parsePath(derivationPath);
-        } catch (Exception e) {
+        } catch(Exception e) {
             return false;
         }
 
@@ -110,6 +116,20 @@ public class KeyDerivation {
         return List.of(new ChildNumber(352, true), new ChildNumber(Network.get() == Network.MAINNET ? 0 : 1, true), new ChildNumber(Math.max(0, account), true));
     }
 
+    public static List<ChildNumber> getBip352ScanDerivation(List<ChildNumber> derivation) {
+        List<ChildNumber> scanDerivation = new ArrayList<>(derivation);
+        scanDerivation.add(new ChildNumber(1, true));
+        scanDerivation.add(new ChildNumber(0, false));
+        return Collections.unmodifiableList(scanDerivation);
+    }
+
+    public static List<ChildNumber> getBip352SpendDerivation(List<ChildNumber> derivation) {
+        List<ChildNumber> spendDerivation = new ArrayList<>(derivation);
+        spendDerivation.add(new ChildNumber(0, true));
+        spendDerivation.add(new ChildNumber(0, false));
+        return Collections.unmodifiableList(spendDerivation);
+    }
+
     public KeyDerivation copy() {
         return new KeyDerivation(masterFingerprint, derivationPath);
     }
@@ -120,9 +140,13 @@ public class KeyDerivation {
 
     @Override
     public boolean equals(Object o) {
-        if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
-        KeyDerivation that = (KeyDerivation) o;
+        if(this == o) {
+            return true;
+        }
+        if(o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        KeyDerivation that = (KeyDerivation)o;
         return that.toString().equals(this.toString());
     }
 

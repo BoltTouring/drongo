@@ -3,6 +3,7 @@ package com.sparrowwallet.drongo.wallet;
 import com.sparrowwallet.drongo.address.Address;
 import com.sparrowwallet.drongo.dns.DnsPayment;
 import com.sparrowwallet.drongo.dns.DnsPaymentCache;
+import com.sparrowwallet.drongo.policy.PolicyType;
 import com.sparrowwallet.drongo.protocol.*;
 import com.sparrowwallet.drongo.psbt.PSBT;
 import com.sparrowwallet.drongo.silentpayments.SilentPayment;
@@ -100,7 +101,16 @@ public class WalletTransaction {
     }
 
     public double getFeeRate() {
-        return (double)fee / transaction.getVirtualSize();
+        return (double)fee / getVirtualSize();
+    }
+
+    public double getVirtualSize() {
+        return getVirtualSize(transaction, outputs);
+    }
+
+    static double getVirtualSize(Transaction transaction, List<Output> outputs) {
+        long unresolvedSilentPaymentOutputs = outputs.stream().filter(output -> output instanceof SilentPaymentOutput && output.getTransactionOutput().getScriptBytes().length == 0).count();
+        return transaction.getVirtualSize() + unresolvedSilentPaymentOutputs * SilentPayment.OUTPUT_SCRIPT_LENGTH;
     }
 
     public long getTotal() {
@@ -121,6 +131,7 @@ public class WalletTransaction {
 
     /**
      * Fee percentage matches the Coldcard implementation of total fee as a percentage of total value out
+     *
      * @return the fee percentage
      */
     public double getFeePercentage() {
@@ -170,7 +181,7 @@ public class WalletTransaction {
         }
 
         if(payment.getType() == Payment.Type.WHIRLPOOL_FEE) {
-            return "Whirlpool fee";
+            return payment.getType().toDisplayString();
         } else if(isPremixSend(payment)) {
             int premixIndex = getOutputIndex(payment.getAddress(), payment.getAmount(), Collections.emptySet()) - 2;
             return "Premix #" + premixIndex;
@@ -191,9 +202,14 @@ public class WalletTransaction {
     public Wallet getToWallet(Collection<Wallet> wallets, Payment payment) {
         for(Wallet openWallet : wallets) {
             if(openWallet != getWallet() && openWallet.isValid()) {
-                WalletNode addressNode = openWallet.getWalletAddresses().get(payment.getAddress());
-                if(addressNode != null) {
-                    return addressNode.getWallet();
+                if(openWallet.getPolicyType() == PolicyType.SINGLE_SP && payment instanceof SilentPayment silentPayment
+                        && silentPayment.getSilentPaymentAddress().equals(openWallet.getSilentPaymentScanAddress().getSilentPaymentAddress())) {
+                    return openWallet;
+                } else {
+                    WalletNode addressNode = openWallet.getWalletAddresses().get(payment.getAddress());
+                    if(addressNode != null) {
+                        return addressNode.getWallet();
+                    }
                 }
             }
         }
@@ -206,8 +222,9 @@ public class WalletTransaction {
                 .anyMatch(p -> payment.getAddress() != null && payment.getAddress().equals(p.getAddress()));
     }
 
-    public List<Payment> getExternalPayments() {
-        return payments.stream().filter(payment -> !(payment instanceof WalletNodePayment)).collect(Collectors.toList());
+    public boolean isConsolidation(Payment payment) {
+        return payment instanceof WalletNodePayment || (wallet != null && wallet.getPolicyType() == PolicyType.SINGLE_SP
+                && payment instanceof SilentPayment silentPayment && wallet.getSilentPaymentScanAddress().getSilentPaymentAddress().equals(silentPayment.getSilentPaymentAddress()));
     }
 
     public List<WalletNodePayment> getWalletNodePayments() {
@@ -269,6 +286,18 @@ public class WalletTransaction {
 
         public SilentPayment getSilentPayment() {
             return (SilentPayment)getPayment();
+        }
+    }
+
+    public static class SilentPaymentChangeOutput extends SilentPaymentOutput {
+        public SilentPaymentChangeOutput(TransactionOutput transactionOutput, SilentPayment silentPayment) {
+            super(transactionOutput, silentPayment);
+        }
+    }
+
+    public static class SilentPaymentConsolidationOutput extends SilentPaymentOutput {
+        public SilentPaymentConsolidationOutput(TransactionOutput transactionOutput, SilentPayment silentPayment) {
+            super(transactionOutput, silentPayment);
         }
     }
 

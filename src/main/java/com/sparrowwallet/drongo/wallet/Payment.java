@@ -5,6 +5,10 @@ import com.sparrowwallet.drongo.address.P2AAddress;
 import com.sparrowwallet.drongo.dns.DnsPayment;
 import com.sparrowwallet.drongo.dns.DnsPaymentCache;
 
+import java.util.Arrays;
+import java.util.Locale;
+import java.util.stream.Collectors;
+
 public class Payment {
     private Address address;
     private String label;
@@ -66,6 +70,12 @@ public class Payment {
 
     public enum Type {
         DEFAULT, WHIRLPOOL_FEE, FAKE_MIX, MIX, ANCHOR;
+
+        public String toDisplayString() {
+            return Arrays.stream(this.toString().toLowerCase(Locale.ROOT).split("_"))
+                    .map(w -> Character.toUpperCase(w.charAt(0)) + w.substring(1))
+                    .collect(Collectors.joining(" "));
+        }
     }
 
     public String getDisplayAddress() {

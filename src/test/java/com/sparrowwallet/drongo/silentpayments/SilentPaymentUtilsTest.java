@@ -1,5 +1,6 @@
 package com.sparrowwallet.drongo.silentpayments;
 
+import com.sparrowwallet.drongo.KeyPurpose;
 import com.sparrowwallet.drongo.Utils;
 import com.sparrowwallet.drongo.address.Address;
 import com.sparrowwallet.drongo.address.P2TRAddress;
@@ -7,20 +8,30 @@ import com.sparrowwallet.drongo.crypto.ECKey;
 import com.sparrowwallet.drongo.policy.Policy;
 import com.sparrowwallet.drongo.policy.PolicyType;
 import com.sparrowwallet.drongo.protocol.*;
+import com.sparrowwallet.drongo.psbt.PSBT;
+import com.sparrowwallet.drongo.psbt.PSBTInput;
 import com.sparrowwallet.drongo.wallet.*;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigInteger;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.security.SecureRandom;
 import java.util.*;
 
 public class SilentPaymentUtilsTest {
+    private static final String STANDARD_SCAN_PRIV = "0f694e068028a717f8af6b9411f9a133dd3565258714cc226594b34db90c1f2c";
+    private static final String STANDARD_SPEND_PRIV = "9d6ad855ce3417ef84e836892e5a56392bfba05fa5d97ccea30e266f540e08b3";
+
+    // BIP352 tweak compute tests.
+
     @Test
     public void testTweak() {
         Transaction transaction = new Transaction();
         transaction.addInput(Sha256Hash.wrap("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"), 0, new Script(Utils.hexToBytes("483046022100ad79e6801dd9a8727f342f31c71c4912866f59dc6e7981878e92c5844a0ce929022100fb0d2393e813968648b9753b7e9871d90ab3d815ebf91820d704b19f4ed224d621025a1e61f898173040e20616d43e9f496fba90338a39faa1ed98fcbaeee4dd9be5")));
         transaction.addInput(Sha256Hash.wrap("a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d"), 0, new Script(Utils.hexToBytes("48304602210086783ded73e961037e77d49d9deee4edc2b23136e9728d56e4491c80015c3a63022100fda4c0f21ea18de29edbce57f7134d613e044ee150a89e2e64700de2d4e83d4e2103bd85685d03d111699b15d046319febe77f8de5286e9e512703cdee1bf3be3792")));
-        transaction.addOutput(1000L, ScriptType.P2TR.getOutputScript(ECKey.fromPublicOnly(Utils.hexToBytes("3e9fce73d4e77a4809908e3c3a2e54ee147b9312dc5044a193d1fc85de46e3c1"))));
+        transaction.addOutput(1000L, ScriptType.P2TR.getOutputScript(PolicyType.SINGLE_HD, ECKey.fromPublicOnly(Utils.hexToBytes("3e9fce73d4e77a4809908e3c3a2e54ee147b9312dc5044a193d1fc85de46e3c1"))));
 
         Map<HashIndex, Script> spentScriptPubKeys = new HashMap<>();
         HashIndex hashIndex0 = new HashIndex(transaction.getInputs().getFirst().getOutpoint().getHash(), transaction.getInputs().getFirst().getOutpoint().getIndex());
@@ -40,7 +51,7 @@ public class SilentPaymentUtilsTest {
         Transaction transaction = new Transaction();
         transaction.addInput(Sha256Hash.wrap("a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d"), 0, new Script(Utils.hexToBytes("483046022100ad79e6801dd9a8727f342f31c71c4912866f59dc6e7981878e92c5844a0ce929022100fb0d2393e813968648b9753b7e9871d90ab3d815ebf91820d704b19f4ed224d621025a1e61f898173040e20616d43e9f496fba90338a39faa1ed98fcbaeee4dd9be5")));
         transaction.addInput(Sha256Hash.wrap("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"), 0, new Script(Utils.hexToBytes("48304602210086783ded73e961037e77d49d9deee4edc2b23136e9728d56e4491c80015c3a63022100fda4c0f21ea18de29edbce57f7134d613e044ee150a89e2e64700de2d4e83d4e2103bd85685d03d111699b15d046319febe77f8de5286e9e512703cdee1bf3be3792")));
-        transaction.addOutput(1000L, ScriptType.P2TR.getOutputScript(ECKey.fromPublicOnly(Utils.hexToBytes("3e9fce73d4e77a4809908e3c3a2e54ee147b9312dc5044a193d1fc85de46e3c1"))));
+        transaction.addOutput(1000L, ScriptType.P2TR.getOutputScript(PolicyType.SINGLE_HD, ECKey.fromPublicOnly(Utils.hexToBytes("3e9fce73d4e77a4809908e3c3a2e54ee147b9312dc5044a193d1fc85de46e3c1"))));
 
         Map<HashIndex, Script> spentScriptPubKeys = new HashMap<>();
         HashIndex hashIndex0 = new HashIndex(transaction.getInputs().getFirst().getOutpoint().getHash(), transaction.getInputs().getFirst().getOutpoint().getIndex());
@@ -60,7 +71,7 @@ public class SilentPaymentUtilsTest {
         Transaction transaction = new Transaction();
         transaction.addInput(Sha256Hash.wrap("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"), 0, new Script(Utils.hexToBytes("483046022100ad79e6801dd9a8727f342f31c71c4912866f59dc6e7981878e92c5844a0ce929022100fb0d2393e813968648b9753b7e9871d90ab3d815ebf91820d704b19f4ed224d621025a1e61f898173040e20616d43e9f496fba90338a39faa1ed98fcbaeee4dd9be5")));
         transaction.addInput(Sha256Hash.wrap("a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d"), 0, new Script(Utils.hexToBytes("473045022100a8c61b2d470e393279d1ba54f254b7c237de299580b7fa01ffcc940442ecec4502201afba952f4e4661c40acde7acc0341589031ba103a307b886eb867b23b850b972103782eeb913431ca6e9b8c2fd80a5f72ed2024ef72a3c6fb10263c379937323338")));
-        transaction.addOutput(1000L, ScriptType.P2TR.getOutputScript(ECKey.fromPublicOnly(Utils.hexToBytes("be368e28979d950245d742891ae6064020ba548c1e2e65a639a8bb0675d95cff"))));
+        transaction.addOutput(1000L, ScriptType.P2TR.getOutputScript(PolicyType.SINGLE_HD, ECKey.fromPublicOnly(Utils.hexToBytes("be368e28979d950245d742891ae6064020ba548c1e2e65a639a8bb0675d95cff"))));
 
         Map<HashIndex, Script> spentScriptPubKeys = new HashMap<>();
         HashIndex hashIndex0 = new HashIndex(transaction.getInputs().getFirst().getOutpoint().getHash(), transaction.getInputs().getFirst().getOutpoint().getIndex());
@@ -80,7 +91,7 @@ public class SilentPaymentUtilsTest {
         Transaction transaction = new Transaction();
         transaction.addInput(Sha256Hash.wrap("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"), 0, new Script(new byte[0]), new TransactionWitness(transaction, List.of(Utils.hexToBytes("0140c459b671370d12cfb5acee76da7e3ba7cc29b0b4653e3af8388591082660137d087fdc8e89a612cd5d15be0febe61fc7cdcf3161a26e599a4514aa5c3e86f47b"))));
         transaction.addInput(Sha256Hash.wrap("a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d"), 0, new Script(new byte[0]), new TransactionWitness(transaction, List.of(Utils.hexToBytes("0140bd1e708f92dbeaf24a6b8dd22e59c6274355424d62baea976b449e220fd75b13578e262ab11b7aa58e037f0c6b0519b66803b7d9decaa1906dedebfb531c56c1"))));
-        transaction.addOutput(1000L, ScriptType.P2TR.getOutputScript(ECKey.fromPublicOnly(Utils.hexToBytes("de88bea8e7ffc9ce1af30d1132f910323c505185aec8eae361670421e749a1fb"))));
+        transaction.addOutput(1000L, ScriptType.P2TR.getOutputScript(PolicyType.SINGLE_HD, ECKey.fromPublicOnly(Utils.hexToBytes("de88bea8e7ffc9ce1af30d1132f910323c505185aec8eae361670421e749a1fb"))));
 
         Map<HashIndex, Script> spentScriptPubKeys = new HashMap<>();
         HashIndex hashIndex0 = new HashIndex(transaction.getInputs().getFirst().getOutpoint().getHash(), transaction.getInputs().getFirst().getOutpoint().getIndex());
@@ -115,12 +126,12 @@ public class SilentPaymentUtilsTest {
         Assertions.assertEquals("03b990f5b1d90ea8fd4bdd5c856a9dfe17035d196958062e2c6cb4c99e413f3548", Utils.bytesToHex(tweak));
 
         ECKey tweakKey = ECKey.fromPublicOnly(tweak);
-        BigInteger scanPrivateKey = new BigInteger(1, Utils.hexToBytes("0f694e068028a717f8af6b9411f9a133dd3565258714cc226594b34db90c1f2c"));
+        BigInteger scanPrivateKey = new BigInteger(1, Utils.hexToBytes(STANDARD_SCAN_PRIV));
         ECKey sharedSecret = tweakKey.multiply(scanPrivateKey, true);
         Assertions.assertEquals("030e7f5ca4bf109fc35c8c2d878f756c891ac04c456cc5f0b05fcec4d3b2b1beb2", Utils.bytesToHex(sharedSecret.getPubKey()));
         byte[] tk = Utils.taggedHash(SilentPaymentUtils.BIP_0352_SHARED_SECRET_TAG, Utils.concat(sharedSecret.getPubKey(true), new byte[4]));
         ECKey tkKey = ECKey.fromPrivate(tk);
-        ECKey bSpend = ECKey.fromPublicOnly(ECKey.fromPrivate(Utils.hexToBytes("9d6ad855ce3417ef84e836892e5a56392bfba05fa5d97ccea30e266f540e08b3")));
+        ECKey bSpend = ECKey.fromPublicOnly(ECKey.fromPrivate(Utils.hexToBytes(STANDARD_SPEND_PRIV)));
         ECKey Pk = bSpend.add(tkKey, true);
         Assertions.assertEquals("77cab7dd12b10259ee82c6ea4b509774e33e7078e7138f568092241bf26b99f1", Utils.bytesToHex(Pk.getPubKeyXCoord()));
         Address address = new P2TRAddress(Pk.getPubKeyXCoord());
@@ -132,17 +143,19 @@ public class SilentPaymentUtilsTest {
         Transaction transaction = new Transaction();
         transaction.addInput(Sha256Hash.wrap("a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d"), 0, new Script(Utils.hexToBytes("483046022100ad79e6801dd9a8727f342f31c71c4912866f59dc6e7981878e92c5844a0ce929022100fb0d2393e813968648b9753b7e9871d90ab3d815ebf91820d704b19f4ed224d621025a1e61f898173040e20616d43e9f496fba90338a39faa1ed98fcbaeee4dd9be5")));
         transaction.addInput(Sha256Hash.wrap("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"), 0, new Script(Utils.hexToBytes("48304602210086783ded73e961037e77d49d9deee4edc2b23136e9728d56e4491c80015c3a63022100fda4c0f21ea18de29edbce57f7134d613e044ee150a89e2e64700de2d4e83d4e2103bd85685d03d111699b15d046319febe77f8de5286e9e512703cdee1bf3be3792")));
-        transaction.addOutput(1000L, ScriptType.P2WPKH.getOutputScript(ECKey.fromPublicOnly(Utils.hexToBytes("3e9fce73d4e77a4809908e3c3a2e54ee147b9312dc5044a193d1fc85de46e3c1"))));
+        transaction.addOutput(1000L, ScriptType.P2WPKH.getOutputScript(PolicyType.SINGLE_HD, ECKey.fromPublicOnly(Utils.hexToBytes("3e9fce73d4e77a4809908e3c3a2e54ee147b9312dc5044a193d1fc85de46e3c1"))));
 
         Assertions.assertFalse(SilentPaymentUtils.containsTaprootOutput(transaction));
     }
+
+    // BIP352 send-side compute address tests.
 
     @Test
     public void testSimpleSendTwoInputs() throws InvalidSilentPaymentException {
         Transaction transaction = new Transaction();
         transaction.addInput(Sha256Hash.wrap("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"), 0, new Script(Utils.hexToBytes("483046022100ad79e6801dd9a8727f342f31c71c4912866f59dc6e7981878e92c5844a0ce929022100fb0d2393e813968648b9753b7e9871d90ab3d815ebf91820d704b19f4ed224d621025a1e61f898173040e20616d43e9f496fba90338a39faa1ed98fcbaeee4dd9be5")));
         transaction.addInput(Sha256Hash.wrap("a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d"), 0, new Script(Utils.hexToBytes("48304602210086783ded73e961037e77d49d9deee4edc2b23136e9728d56e4491c80015c3a63022100fda4c0f21ea18de29edbce57f7134d613e044ee150a89e2e64700de2d4e83d4e2103bd85685d03d111699b15d046319febe77f8de5286e9e512703cdee1bf3be3792")));
-        transaction.addOutput(1000L, ScriptType.P2TR.getOutputScript(ECKey.fromPublicOnly(Utils.hexToBytes("3e9fce73d4e77a4809908e3c3a2e54ee147b9312dc5044a193d1fc85de46e3c1"))));
+        transaction.addOutput(1000L, ScriptType.P2TR.getOutputScript(PolicyType.SINGLE_HD, ECKey.fromPublicOnly(Utils.hexToBytes("3e9fce73d4e77a4809908e3c3a2e54ee147b9312dc5044a193d1fc85de46e3c1"))));
 
         Map<HashIndex, Script> spentScriptPubKeys = new HashMap<>();
         HashIndex hashIndex0 = new HashIndex(transaction.getInputs().getFirst().getOutpoint().getHash(), transaction.getInputs().getFirst().getOutpoint().getIndex());
@@ -157,17 +170,17 @@ public class SilentPaymentUtilsTest {
         Assertions.assertEquals("024ac253c216532e961988e2a8ce266a447c894c781e52ef6cee902361db960004", Utils.bytesToHex(tweak));
 
         ECKey tweakKey = ECKey.fromPublicOnly(tweak);
-        BigInteger scanPrivateKey = new BigInteger(1, Utils.hexToBytes("0f694e068028a717f8af6b9411f9a133dd3565258714cc226594b34db90c1f2c"));
+        BigInteger scanPrivateKey = new BigInteger(1, Utils.hexToBytes(STANDARD_SCAN_PRIV));
         ECKey sharedSecret = tweakKey.multiply(scanPrivateKey, true);
         byte[] tk = Utils.taggedHash(SilentPaymentUtils.BIP_0352_SHARED_SECRET_TAG, Utils.concat(sharedSecret.getPubKey(true), new byte[4]));
         ECKey tkKey = ECKey.fromPrivate(tk);
-        ECKey bSpend = ECKey.fromPublicOnly(ECKey.fromPrivate(Utils.hexToBytes("9d6ad855ce3417ef84e836892e5a56392bfba05fa5d97ccea30e266f540e08b3")));
+        ECKey bSpend = ECKey.fromPublicOnly(ECKey.fromPrivate(Utils.hexToBytes(STANDARD_SPEND_PRIV)));
         ECKey Pk = bSpend.add(tkKey, true);
         Address address = new P2TRAddress(Pk.getPubKeyXCoord());
         Assertions.assertEquals("3e9fce73d4e77a4809908e3c3a2e54ee147b9312dc5044a193d1fc85de46e3c1", Utils.bytesToHex(address.getData()));
 
         Wallet sendWallet = new Wallet();
-        sendWallet.setPolicyType(PolicyType.SINGLE);
+        sendWallet.setPolicyType(PolicyType.SINGLE_HD);
         sendWallet.setScriptType(ScriptType.P2WPKH);
         Map<HashIndex, WalletNode> utxos = new LinkedHashMap<>();
         Map<WalletNode, ECKey> privateKeys = new LinkedHashMap<>();
@@ -186,7 +199,7 @@ public class SilentPaymentUtilsTest {
 
         TestKeystore sendKeystore = new TestKeystore(privateKeys);
         sendWallet.getKeystores().add(sendKeystore);
-        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
+        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
 
         SilentPaymentAddress silentPaymentAddress = SilentPaymentAddress.from("sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv");
         List<SilentPayment> silentPayments = List.of(new SilentPayment(silentPaymentAddress, "", 0, false));
@@ -200,7 +213,7 @@ public class SilentPaymentUtilsTest {
     @Test
     public void testSimpleSendTwoInputsReversed() throws InvalidSilentPaymentException {
         Wallet sendWallet = new Wallet();
-        sendWallet.setPolicyType(PolicyType.SINGLE);
+        sendWallet.setPolicyType(PolicyType.SINGLE_HD);
         sendWallet.setScriptType(ScriptType.P2WPKH);
         Map<HashIndex, WalletNode> utxos = new LinkedHashMap<>();
         Map<WalletNode, ECKey> privateKeys = new LinkedHashMap<>();
@@ -219,7 +232,7 @@ public class SilentPaymentUtilsTest {
 
         TestKeystore sendKeystore = new TestKeystore(privateKeys);
         sendWallet.getKeystores().add(sendKeystore);
-        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
+        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
 
         SilentPaymentAddress silentPaymentAddress = SilentPaymentAddress.from("sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv");
         List<SilentPayment> silentPayments = List.of(new SilentPayment(silentPaymentAddress, "", 0, false));
@@ -232,7 +245,7 @@ public class SilentPaymentUtilsTest {
     @Test
     public void testSimpleSendTwoInputsSameTransaction() throws InvalidSilentPaymentException {
         Wallet sendWallet = new Wallet();
-        sendWallet.setPolicyType(PolicyType.SINGLE);
+        sendWallet.setPolicyType(PolicyType.SINGLE_HD);
         sendWallet.setScriptType(ScriptType.P2WPKH);
         Map<HashIndex, WalletNode> utxos = new LinkedHashMap<>();
         Map<WalletNode, ECKey> privateKeys = new LinkedHashMap<>();
@@ -251,7 +264,7 @@ public class SilentPaymentUtilsTest {
 
         TestKeystore sendKeystore = new TestKeystore(privateKeys);
         sendWallet.getKeystores().add(sendKeystore);
-        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
+        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
 
         SilentPaymentAddress silentPaymentAddress = SilentPaymentAddress.from("sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv");
         List<SilentPayment> silentPayments = List.of(new SilentPayment(silentPaymentAddress, "", 0, false));
@@ -264,7 +277,7 @@ public class SilentPaymentUtilsTest {
     @Test
     public void testSimpleSendTwoInputsSameTransactionReversed() throws InvalidSilentPaymentException {
         Wallet sendWallet = new Wallet();
-        sendWallet.setPolicyType(PolicyType.SINGLE);
+        sendWallet.setPolicyType(PolicyType.SINGLE_HD);
         sendWallet.setScriptType(ScriptType.P2WPKH);
         Map<HashIndex, WalletNode> utxos = new LinkedHashMap<>();
         Map<WalletNode, ECKey> privateKeys = new LinkedHashMap<>();
@@ -283,7 +296,7 @@ public class SilentPaymentUtilsTest {
 
         TestKeystore sendKeystore = new TestKeystore(privateKeys);
         sendWallet.getKeystores().add(sendKeystore);
-        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
+        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
 
         SilentPaymentAddress silentPaymentAddress = SilentPaymentAddress.from("sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv");
         List<SilentPayment> silentPayments = List.of(new SilentPayment(silentPaymentAddress, "", 0, false));
@@ -296,7 +309,7 @@ public class SilentPaymentUtilsTest {
     @Test
     public void testOutpointOrderingIndex() throws InvalidSilentPaymentException {
         Wallet sendWallet = new Wallet();
-        sendWallet.setPolicyType(PolicyType.SINGLE);
+        sendWallet.setPolicyType(PolicyType.SINGLE_HD);
         sendWallet.setScriptType(ScriptType.P2WPKH);
         Map<HashIndex, WalletNode> utxos = new LinkedHashMap<>();
         Map<WalletNode, ECKey> privateKeys = new LinkedHashMap<>();
@@ -315,7 +328,7 @@ public class SilentPaymentUtilsTest {
 
         TestKeystore sendKeystore = new TestKeystore(privateKeys);
         sendWallet.getKeystores().add(sendKeystore);
-        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
+        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
 
         SilentPaymentAddress silentPaymentAddress = SilentPaymentAddress.from("sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv");
         List<SilentPayment> silentPayments = List.of(new SilentPayment(silentPaymentAddress, "", 0, false));
@@ -328,7 +341,7 @@ public class SilentPaymentUtilsTest {
     @Test
     public void testSingleRecipientSamePubKey() throws InvalidSilentPaymentException {
         Wallet sendWallet = new Wallet();
-        sendWallet.setPolicyType(PolicyType.SINGLE);
+        sendWallet.setPolicyType(PolicyType.SINGLE_HD);
         sendWallet.setScriptType(ScriptType.P2WPKH);
         Map<HashIndex, WalletNode> utxos = new LinkedHashMap<>();
         Map<WalletNode, ECKey> privateKeys = new LinkedHashMap<>();
@@ -347,7 +360,7 @@ public class SilentPaymentUtilsTest {
 
         TestKeystore sendKeystore = new TestKeystore(privateKeys);
         sendWallet.getKeystores().add(sendKeystore);
-        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
+        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
 
         SilentPaymentAddress silentPaymentAddress = SilentPaymentAddress.from("sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv");
         List<SilentPayment> silentPayments = List.of(new SilentPayment(silentPaymentAddress, "", 0, false));
@@ -360,7 +373,7 @@ public class SilentPaymentUtilsTest {
     @Test
     public void testSingleRecipientTaprootOnlyEvenY() throws InvalidSilentPaymentException {
         Wallet sendWallet = new Wallet();
-        sendWallet.setPolicyType(PolicyType.SINGLE);
+        sendWallet.setPolicyType(PolicyType.SINGLE_HD);
         sendWallet.setScriptType(ScriptType.P2TR);
         Map<HashIndex, WalletNode> utxos = new LinkedHashMap<>();
         Map<WalletNode, ECKey> privateKeys = new LinkedHashMap<>();
@@ -389,7 +402,7 @@ public class SilentPaymentUtilsTest {
 
         TestKeystore sendKeystore = new TestKeystore(privateKeys);
         sendWallet.getKeystores().add(sendKeystore);
-        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
+        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
 
         SilentPaymentAddress silentPaymentAddress = SilentPaymentAddress.from("sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv");
         List<SilentPayment> silentPayments = List.of(new SilentPayment(silentPaymentAddress, "", 0, false));
@@ -402,7 +415,7 @@ public class SilentPaymentUtilsTest {
     @Test
     public void testSingleRecipientTaprootOnlyMixedY() throws InvalidSilentPaymentException {
         Wallet sendWallet = new Wallet();
-        sendWallet.setPolicyType(PolicyType.SINGLE);
+        sendWallet.setPolicyType(PolicyType.SINGLE_HD);
         sendWallet.setScriptType(ScriptType.P2TR);
         Map<HashIndex, WalletNode> utxos = new LinkedHashMap<>();
         Map<WalletNode, ECKey> privateKeys = new LinkedHashMap<>();
@@ -431,7 +444,7 @@ public class SilentPaymentUtilsTest {
 
         TestKeystore sendKeystore = new TestKeystore(privateKeys);
         sendWallet.getKeystores().add(sendKeystore);
-        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
+        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
 
         SilentPaymentAddress silentPaymentAddress = SilentPaymentAddress.from("sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv");
         List<SilentPayment> silentPayments = List.of(new SilentPayment(silentPaymentAddress, "", 0, false));
@@ -444,12 +457,12 @@ public class SilentPaymentUtilsTest {
     @Test
     public void testSingleRecipientTaprootEvenYAndNonTaproot() throws InvalidSilentPaymentException {
         Wallet taprootWallet = new Wallet();
-        taprootWallet.setPolicyType(PolicyType.SINGLE);
+        taprootWallet.setPolicyType(PolicyType.SINGLE_HD);
         taprootWallet.setScriptType(ScriptType.P2TR);
         Map<WalletNode, ECKey> taprootPrivateKeys = new LinkedHashMap<>();
 
         Wallet segwitWallet = new Wallet();
-        segwitWallet.setPolicyType(PolicyType.SINGLE);
+        segwitWallet.setPolicyType(PolicyType.SINGLE_HD);
         segwitWallet.setScriptType(ScriptType.P2WPKH);
         Map<WalletNode, ECKey> segwitPrivateKeys = new LinkedHashMap<>();
 
@@ -474,11 +487,11 @@ public class SilentPaymentUtilsTest {
 
         TestKeystore taprootKeystore = new TestKeystore(taprootPrivateKeys);
         taprootWallet.getKeystores().add(taprootKeystore);
-        taprootWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2WPKH, taprootWallet.getKeystores(), 1));
+        taprootWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2WPKH, taprootWallet.getKeystores(), 1));
 
         TestKeystore segwitKeystore = new TestKeystore(segwitPrivateKeys);
         segwitWallet.getKeystores().add(segwitKeystore);
-        segwitWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2WPKH, segwitWallet.getKeystores(), 1));
+        segwitWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2WPKH, segwitWallet.getKeystores(), 1));
 
         SilentPaymentAddress silentPaymentAddress = SilentPaymentAddress.from("sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv");
         List<SilentPayment> silentPayments = List.of(new SilentPayment(silentPaymentAddress, "", 0, false));
@@ -491,12 +504,12 @@ public class SilentPaymentUtilsTest {
     @Test
     public void testSingleRecipientTaprootOddYAndNonTaproot() throws InvalidSilentPaymentException {
         Wallet taprootWallet = new Wallet();
-        taprootWallet.setPolicyType(PolicyType.SINGLE);
+        taprootWallet.setPolicyType(PolicyType.SINGLE_HD);
         taprootWallet.setScriptType(ScriptType.P2TR);
         Map<WalletNode, ECKey> taprootPrivateKeys = new LinkedHashMap<>();
 
         Wallet segwitWallet = new Wallet();
-        segwitWallet.setPolicyType(PolicyType.SINGLE);
+        segwitWallet.setPolicyType(PolicyType.SINGLE_HD);
         segwitWallet.setScriptType(ScriptType.P2WPKH);
         Map<WalletNode, ECKey> segwitPrivateKeys = new LinkedHashMap<>();
 
@@ -521,11 +534,11 @@ public class SilentPaymentUtilsTest {
 
         TestKeystore taprootKeystore = new TestKeystore(taprootPrivateKeys);
         taprootWallet.getKeystores().add(taprootKeystore);
-        taprootWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2WPKH, taprootWallet.getKeystores(), 1));
+        taprootWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2WPKH, taprootWallet.getKeystores(), 1));
 
         TestKeystore segwitKeystore = new TestKeystore(segwitPrivateKeys);
         segwitWallet.getKeystores().add(segwitKeystore);
-        segwitWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2WPKH, segwitWallet.getKeystores(), 1));
+        segwitWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2WPKH, segwitWallet.getKeystores(), 1));
 
         SilentPaymentAddress silentPaymentAddress = SilentPaymentAddress.from("sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv");
         List<SilentPayment> silentPayments = List.of(new SilentPayment(silentPaymentAddress, "", 0, false));
@@ -538,7 +551,7 @@ public class SilentPaymentUtilsTest {
     @Test
     public void testMultipleOutputsSameRecipient() throws InvalidSilentPaymentException {
         Wallet sendWallet = new Wallet();
-        sendWallet.setPolicyType(PolicyType.SINGLE);
+        sendWallet.setPolicyType(PolicyType.SINGLE_HD);
         sendWallet.setScriptType(ScriptType.P2WPKH);
         Map<HashIndex, WalletNode> utxos = new LinkedHashMap<>();
         Map<WalletNode, ECKey> privateKeys = new LinkedHashMap<>();
@@ -557,7 +570,7 @@ public class SilentPaymentUtilsTest {
 
         TestKeystore sendKeystore = new TestKeystore(privateKeys);
         sendWallet.getKeystores().add(sendKeystore);
-        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
+        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
 
         SilentPaymentAddress silentPaymentAddress0 = SilentPaymentAddress.from("sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv");
         SilentPaymentAddress silentPaymentAddress1 = SilentPaymentAddress.from("sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv");
@@ -574,7 +587,7 @@ public class SilentPaymentUtilsTest {
     @Test
     public void testMultipleOutputsMultipleRecipients() throws InvalidSilentPaymentException {
         Wallet sendWallet = new Wallet();
-        sendWallet.setPolicyType(PolicyType.SINGLE);
+        sendWallet.setPolicyType(PolicyType.SINGLE_HD);
         sendWallet.setScriptType(ScriptType.P2WPKH);
         Map<HashIndex, WalletNode> utxos = new LinkedHashMap<>();
         Map<WalletNode, ECKey> privateKeys = new LinkedHashMap<>();
@@ -593,7 +606,7 @@ public class SilentPaymentUtilsTest {
 
         TestKeystore sendKeystore = new TestKeystore(privateKeys);
         sendWallet.getKeystores().add(sendKeystore);
-        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
+        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
 
         SilentPaymentAddress silentPaymentAddress0 = SilentPaymentAddress.from("sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv");
         SilentPaymentAddress silentPaymentAddress1 = SilentPaymentAddress.from("sp1qqgrz6j0lcqnc04vxccydl0kpsj4frfje0ktmgcl2t346hkw30226xqupawdf48k8882j0strrvcmgg2kdawz53a54dd376ngdhak364hzcmynqtn");
@@ -608,6 +621,80 @@ public class SilentPaymentUtilsTest {
         Assertions.assertEquals("841792c33c9dc6193e76744134125d40add8f2f4a96475f28ba150be032d64e8", Utils.bytesToHex(silentPayments.get(1).getAddress().getData()));
         Assertions.assertEquals("Third", silentPayments.getLast().getLabel());
         Assertions.assertEquals("2e847bb01d1b491da512ddd760b8509617ee38057003d6115d00ba562451323a", Utils.bytesToHex(silentPayments.getLast().getAddress().getData()));
+    }
+
+    @Test
+    public void testBip375ThreeOutputsSameScanKey() throws InvalidSilentPaymentException {
+        // BIP375 sorts codes sharing a scan key lexicographically ascending to determine the k ordering, and orders
+        // codes sharing both scan and spend keys by ascending output index.
+        // Vector "can finalize: three sp outputs (same scan key) - output 0 uses label=1, outputs 1 and 2 uses label=2
+        // (same spend key)" from the proposed BIP375 v1.1.1 test vectors, https://github.com/bitcoin/bips/pull/2207
+        // Ascending code order places the two 032193ad... outputs ahead of 03d43158..., so outputs 1 and 2 take
+        // k=0 and k=1 in output index order and output 0 takes k=2, inverting the output ordering entirely.
+        ECKey scanKey = ECKey.fromPublicOnly(Utils.hexToBytes("028b790e0987fde9f0d12398eb6be30c7376793c647865a2a02f2efc960d966568"));
+        ECKey spendKeyLabel1 = ECKey.fromPublicOnly(Utils.hexToBytes("03d431588dee61ab3a39725b299c3742dc66a0861decf591b423b0e527070f8234"));
+        ECKey spendKeyLabel2 = ECKey.fromPublicOnly(Utils.hexToBytes("032193ad0c875fac5243738022900a7724c6175ddac9944165aab457aadf9c4f3c"));
+
+        List<SilentPayment> silentPayments = List.of(new SilentPayment(new SilentPaymentAddress(scanKey, spendKeyLabel1), "Output 0", 0, false),
+                new SilentPayment(new SilentPaymentAddress(scanKey, spendKeyLabel2), "Output 1", 0, false),
+                new SilentPayment(new SilentPaymentAddress(scanKey, spendKeyLabel2), "Output 2", 0, false));
+
+        ECKey summedPrivateKey = ECKey.fromPrivate(Utils.hexToBytes("7e31eeeb1aa2597b6d63b357541461d75ddae76b7603d24619f5ebed9e88ec31"));
+        Set<HashIndex> outpoints = Set.of(new HashIndex(Sha256Hash.wrap("4a9800c78110ea283ed15d2e53dd79401eff2313771a2ab114ab0b3b6617a718"), 0));
+
+        SilentPaymentUtils.computeOutputAddresses(silentPayments, summedPrivateKey, outpoints);
+        Assertions.assertEquals(3, silentPayments.size());
+        Assertions.assertEquals("Output 0", silentPayments.getFirst().getLabel());
+        Assertions.assertEquals("1bffa10fdaa2502c2f0c9285fe0af19a50f8515e3b6dfbf56de850d999014400", Utils.bytesToHex(silentPayments.getFirst().getAddress().getData()));
+        Assertions.assertEquals("Output 1", silentPayments.get(1).getLabel());
+        Assertions.assertEquals("884da6708c82b9b56c98bd3be6e5f53894bb1bfd90bfacf894025570f6bd5305", Utils.bytesToHex(silentPayments.get(1).getAddress().getData()));
+        Assertions.assertEquals("Output 2", silentPayments.getLast().getLabel());
+        Assertions.assertEquals("d291d339280e0c86e2c708a591f8e8e2f892d12a7cfe8510b667799b71131c86", Utils.bytesToHex(silentPayments.getLast().getAddress().getData()));
+    }
+
+    // BIP352 key sum tests.
+
+    @Test
+    public void testIntermediateZeroSum() throws InvalidSilentPaymentException {
+        // BIP 352 test vector: Input keys intermediate sum is zero but final sum is non-zero
+        // Keys: [A, -A mod n, A] where:
+        // A        = a6df6a0bb448992a301df4258e06a89fe7cf7146f59ac3bd5ff26083acb22ceb
+        // -A mod n = 592095f44bb766d5cfe20bda71f9575ed2df6b9fb9addc7e5fdffe0923841456
+        // Expected sum = A (non-zero)
+
+        Wallet sendWallet = new Wallet();
+        sendWallet.setPolicyType(PolicyType.SINGLE_HD);
+        sendWallet.setScriptType(ScriptType.P2WPKH);
+        Map<HashIndex, WalletNode> utxos = new LinkedHashMap<>();
+        Map<WalletNode, ECKey> privateKeys = new LinkedHashMap<>();
+
+        // Input 0: key A
+        WalletNode walletNode0 = new WalletNode(sendWallet, "/0/0");
+        HashIndex ref0 = new HashIndex(Sha256Hash.wrap("3a286147b25e16ae80aff406f2673c6e565418c40f45c071245cdebc8a94174e"), 0);
+        ECKey privKey0 = ECKey.fromPrivate(Utils.hexToBytes("a6df6a0bb448992a301df4258e06a89fe7cf7146f59ac3bd5ff26083acb22ceb"));
+        utxos.put(ref0, walletNode0);
+        privateKeys.put(walletNode0, privKey0);
+
+        // Input 1: key -A mod n
+        WalletNode walletNode1 = new WalletNode(sendWallet, "/0/1");
+        HashIndex ref1 = new HashIndex(Sha256Hash.wrap("3a286147b25e16ae80aff406f2673c6e565418c40f45c071245cdebc8a94174e"), 1);
+        ECKey privKey1 = ECKey.fromPrivate(Utils.hexToBytes("592095f44bb766d5cfe20bda71f9575ed2df6b9fb9addc7e5fdffe0923841456"));
+        utxos.put(ref1, walletNode1);
+        privateKeys.put(walletNode1, privKey1);
+
+        // Input 2: key A (same as input 0)
+        WalletNode walletNode2 = new WalletNode(sendWallet, "/0/2");
+        HashIndex ref2 = new HashIndex(Sha256Hash.wrap("3a286147b25e16ae80aff406f2673c6e565418c40f45c071245cdebc8a94174e"), 2);
+        ECKey privKey2 = ECKey.fromPrivate(Utils.hexToBytes("a6df6a0bb448992a301df4258e06a89fe7cf7146f59ac3bd5ff26083acb22ceb"));
+        utxos.put(ref2, walletNode2);
+        privateKeys.put(walletNode2, privKey2);
+
+        TestKeystore sendKeystore = new TestKeystore(privateKeys);
+        sendWallet.getKeystores().add(sendKeystore);
+        sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
+
+        ECKey summedKey = SilentPaymentUtils.getSummedPrivateKey(utxos.values());
+        Assertions.assertEquals("a6df6a0bb448992a301df4258e06a89fe7cf7146f59ac3bd5ff26083acb22ceb", Utils.bytesToHex(summedKey.getPrivKeyBytes()));
     }
 
     private static class TestKeystore extends Keystore {
@@ -626,5 +713,571 @@ public class SilentPaymentUtilsTest {
         public boolean hasPrivateKey() {
             return true;
         }
+    }
+
+    // BIP352 receive-side scan tests.
+
+    private static ECKey standardSpendPub() {
+        ECKey priv = ECKey.fromPrivate(Utils.hexToBytes(STANDARD_SPEND_PRIV));
+        return ECKey.fromPublicOnly(priv.getPubKey(true));
+    }
+
+    private static Transaction txWithP2trOutputs(String... xOnlyHexes) {
+        Transaction tx = new Transaction();
+        for(String hex : xOnlyHexes) {
+            // Use the byte[] overload to commit the raw x-only pubkey as-is, with no BIP341 taproot
+            // tweaking. SP output keys are already the final on-chain key.
+            tx.addOutput(0L, ScriptType.P2TR.getOutputScript(Utils.hexToBytes(hex)));
+        }
+        return tx;
+    }
+
+    @Test
+    public void testScanSimplestCase() throws InvalidSilentPaymentException {
+        // BIP352 case 0: "Simple send: two inputs"
+        ECKey scanPriv = ECKey.fromPrivate(Utils.hexToBytes(STANDARD_SCAN_PRIV));
+        ECKey spendPub = standardSpendPub();
+        byte[] tweakKey = Utils.hexToBytes("024ac253c216532e961988e2a8ce266a447c894c781e52ef6cee902361db960004");
+        Transaction tx = txWithP2trOutputs("3e9fce73d4e77a4809908e3c3a2e54ee147b9312dc5044a193d1fc85de46e3c1");
+
+        List<SilentPaymentScanMatch> matches = SilentPaymentUtils.scanTransactionOutputs(scanPriv, spendPub, Collections.emptySet(), tweakKey, tx.getOutputs());
+
+        Assertions.assertEquals(1, matches.size());
+        SilentPaymentScanMatch m = matches.getFirst();
+        Assertions.assertEquals(0, m.outputIndex());
+        Assertions.assertNull(m.labelIndex());
+        Assertions.assertArrayEquals(Utils.hexToBytes("f438b40179a3c4262de12986c0e6cce0634007cdc79c1dcd3e20b9ebc2e7eef6"), m.tweak());
+    }
+
+    @Test
+    public void testScanTaprootEvenY() throws InvalidSilentPaymentException {
+        // BIP352 case 6: "Single recipient: taproot only inputs with even y-values"
+        ECKey scanPriv = ECKey.fromPrivate(Utils.hexToBytes(STANDARD_SCAN_PRIV));
+        ECKey spendPub = standardSpendPub();
+        byte[] tweakKey = Utils.hexToBytes("02dc59cc8e8873b65c1dd5c416d4fbeb647372c329bd84a70c05b310e222e2c183");
+        Transaction tx = txWithP2trOutputs("de88bea8e7ffc9ce1af30d1132f910323c505185aec8eae361670421e749a1fb");
+
+        List<SilentPaymentScanMatch> matches = SilentPaymentUtils.scanTransactionOutputs(scanPriv, spendPub, Collections.emptySet(), tweakKey, tx.getOutputs());
+
+        Assertions.assertEquals(1, matches.size());
+        Assertions.assertEquals(0, matches.getFirst().outputIndex());
+        Assertions.assertNull(matches.getFirst().labelIndex());
+        Assertions.assertArrayEquals(Utils.hexToBytes("3fb9ce5ce1746ced103c8ed254e81f6690764637ddbc876ec1f9b3ddab776b03"), matches.getFirst().tweak());
+    }
+
+    @Test
+    public void testScanTaprootOddY() throws InvalidSilentPaymentException {
+        // BIP352 case 7: "Single recipient: taproot only with mixed even/odd y-values"
+        ECKey scanPriv = ECKey.fromPrivate(Utils.hexToBytes(STANDARD_SCAN_PRIV));
+        ECKey spendPub = standardSpendPub();
+        byte[] tweakKey = Utils.hexToBytes("03b990f5b1d90ea8fd4bdd5c856a9dfe17035d196958062e2c6cb4c99e413f3548");
+        Transaction tx = txWithP2trOutputs("77cab7dd12b10259ee82c6ea4b509774e33e7078e7138f568092241bf26b99f1");
+
+        List<SilentPaymentScanMatch> matches = SilentPaymentUtils.scanTransactionOutputs(scanPriv, spendPub, Collections.emptySet(), tweakKey, tx.getOutputs());
+
+        Assertions.assertEquals(1, matches.size());
+        Assertions.assertEquals(0, matches.getFirst().outputIndex());
+        Assertions.assertNull(matches.getFirst().labelIndex());
+        Assertions.assertArrayEquals(Utils.hexToBytes("f5382508609771068ed079b24e1f72e4a17ee6d1c979066bf1d4e2a5676f09d4"), matches.getFirst().tweak());
+    }
+
+    @Test
+    public void testScanMultipleOutputsSameRecipient() throws InvalidSilentPaymentException {
+        // BIP352 case 10: "Multiple outputs: multiple outputs, same recipient"
+        ECKey scanPriv = ECKey.fromPrivate(Utils.hexToBytes(STANDARD_SCAN_PRIV));
+        ECKey spendPub = standardSpendPub();
+        byte[] tweakKey = Utils.hexToBytes("0314bec14463d6c0181083d607fecfba67bb83f95915f6f247975ec566d5642ee8");
+        Transaction tx = txWithP2trOutputs(
+                "e976a58fbd38aeb4e6093d4df02e9c1de0c4513ae0c588cef68cda5b2f8834ca",
+                "f207162b1a7abc51c42017bef055e9ec1efc3d3567cb720357e2b84325db33ac");
+
+        List<SilentPaymentScanMatch> matches = SilentPaymentUtils.scanTransactionOutputs(scanPriv, spendPub, Collections.emptySet(), tweakKey, tx.getOutputs());
+
+        Assertions.assertEquals(2, matches.size());
+        Assertions.assertEquals(0, matches.get(0).outputIndex());
+        Assertions.assertNull(matches.get(0).labelIndex());
+        Assertions.assertArrayEquals(Utils.hexToBytes("d97e442d110c0bdd31161a7bb6e7862e038d02a09b1484dfbb463f2e0f7c9230"), matches.get(0).tweak());
+        Assertions.assertEquals(1, matches.get(1).outputIndex());
+        Assertions.assertNull(matches.get(1).labelIndex());
+        Assertions.assertArrayEquals(Utils.hexToBytes("33ce085c3c11eaad13694aae3c20301a6c83382ec89a7cde96c6799e2f88805a"), matches.get(1).tweak());
+    }
+
+    @Test
+    public void testScanLabelEvenParity() throws InvalidSilentPaymentException {
+        // BIP352 case 12: "Receiving with labels: label with even parity" — label 2 match.
+        ECKey scanPriv = ECKey.fromPrivate(Utils.hexToBytes(STANDARD_SCAN_PRIV));
+        ECKey spendPub = standardSpendPub();
+        byte[] tweakKey = Utils.hexToBytes("0314bec14463d6c0181083d607fecfba67bb83f95915f6f247975ec566d5642ee8");
+        Transaction tx = txWithP2trOutputs("d014d4860f67d607d60b1af70e0ee236b99658b61bb769832acbbe87c374439a");
+
+        List<SilentPaymentScanMatch> matches = SilentPaymentUtils.scanTransactionOutputs(scanPriv, spendPub, Set.of(2, 3, 1001337), tweakKey, tx.getOutputs());
+
+        Assertions.assertEquals(1, matches.size());
+        Assertions.assertEquals(0, matches.getFirst().outputIndex());
+        Assertions.assertEquals(2, matches.getFirst().labelIndex());
+        Assertions.assertArrayEquals(Utils.hexToBytes("51d4e9d0d482b5700109b4b2e16ff508269b03d800192a043d61dca4a0a72a52"), matches.getFirst().tweak());
+    }
+
+    @Test
+    public void testScanLabelOddParity() throws InvalidSilentPaymentException {
+        // BIP352 case 13: "Receiving with labels: label with odd parity" — label 3 match.
+        ECKey scanPriv = ECKey.fromPrivate(Utils.hexToBytes(STANDARD_SCAN_PRIV));
+        ECKey spendPub = standardSpendPub();
+        byte[] tweakKey = Utils.hexToBytes("0314bec14463d6c0181083d607fecfba67bb83f95915f6f247975ec566d5642ee8");
+        Transaction tx = txWithP2trOutputs("67626aebb3c4307cf0f6c39ca23247598fabf675ab783292eb2f81ae75ad1f8c");
+
+        List<SilentPaymentScanMatch> matches = SilentPaymentUtils.scanTransactionOutputs(scanPriv, spendPub, Set.of(2, 3, 1001337), tweakKey, tx.getOutputs());
+
+        Assertions.assertEquals(1, matches.size());
+        Assertions.assertEquals(3, matches.getFirst().labelIndex());
+        Assertions.assertArrayEquals(Utils.hexToBytes("6024ae214876356b8d917716e7707d267ae16a0fdb07de2a786b74a7bbcddead"), matches.getFirst().tweak());
+    }
+
+    @Test
+    public void testScanLabelLargeInteger() throws InvalidSilentPaymentException {
+        // BIP352 case 14: "Receiving with labels: large label integer" — label 1001337 match.
+        ECKey scanPriv = ECKey.fromPrivate(Utils.hexToBytes(STANDARD_SCAN_PRIV));
+        ECKey spendPub = standardSpendPub();
+        byte[] tweakKey = Utils.hexToBytes("0314bec14463d6c0181083d607fecfba67bb83f95915f6f247975ec566d5642ee8");
+        Transaction tx = txWithP2trOutputs("7efa60ce78ac343df8a013a2027c6c5ef29f9502edcbd769d2c21717fecc5951");
+
+        List<SilentPaymentScanMatch> matches = SilentPaymentUtils.scanTransactionOutputs(scanPriv, spendPub, Set.of(2, 3, 1001337), tweakKey, tx.getOutputs());
+
+        Assertions.assertEquals(1, matches.size());
+        Assertions.assertEquals(1001337, matches.getFirst().labelIndex());
+        Assertions.assertArrayEquals(Utils.hexToBytes("e336b92330c33030285ce42e4115ad92d5197913c88e06b9072b4a9b47c664a2"), matches.getFirst().tweak());
+    }
+
+    @Test
+    public void testScanUnlabeledAndLabeled() throws InvalidSilentPaymentException {
+        // BIP352 case 15: "Multiple outputs with labels: un-labeled and labeled address; same recipient".
+        ECKey scanPriv = ECKey.fromPrivate(Utils.hexToBytes(STANDARD_SCAN_PRIV));
+        ECKey spendPub = standardSpendPub();
+        byte[] tweakKey = Utils.hexToBytes("0314bec14463d6c0181083d607fecfba67bb83f95915f6f247975ec566d5642ee8");
+        Transaction tx = txWithP2trOutputs("39f42624d5c32a77fda80ff0acee269afec601d3791803e80252ae04e4ffcf4c",  // labeled (m=1)
+                "f207162b1a7abc51c42017bef055e9ec1efc3d3567cb720357e2b84325db33ac"); // unlabeled
+
+        List<SilentPaymentScanMatch> matches = SilentPaymentUtils.scanTransactionOutputs(scanPriv, spendPub, Set.of(1), tweakKey, tx.getOutputs());
+
+        Assertions.assertEquals(2, matches.size());
+        Assertions.assertEquals(0, matches.get(0).outputIndex());
+        Assertions.assertEquals(1, matches.get(0).labelIndex());
+        Assertions.assertArrayEquals(Utils.hexToBytes("43100f89f1a6bf10081c92b473ffc57ceac7dbed600b6aba9bb3976f17dbb914"), matches.get(0).tweak());
+        Assertions.assertEquals(1, matches.get(1).outputIndex());
+        Assertions.assertNull(matches.get(1).labelIndex());
+        Assertions.assertArrayEquals(Utils.hexToBytes("33ce085c3c11eaad13694aae3c20301a6c83382ec89a7cde96c6799e2f88805a"), matches.get(1).tweak());
+    }
+
+    @Test
+    public void testScanMultipleLabeledOutputs() throws InvalidSilentPaymentException {
+        // BIP352 case 16: "Multiple outputs with labels: multiple outputs for labeled address; same recipient".
+        ECKey scanPriv = ECKey.fromPrivate(Utils.hexToBytes(STANDARD_SCAN_PRIV));
+        ECKey spendPub = standardSpendPub();
+        byte[] tweakKey = Utils.hexToBytes("0314bec14463d6c0181083d607fecfba67bb83f95915f6f247975ec566d5642ee8");
+        Transaction tx = txWithP2trOutputs("39f42624d5c32a77fda80ff0acee269afec601d3791803e80252ae04e4ffcf4c", "83dc944e61603137294829aed56c74c9b087d80f2c021b98a7fae5799000696c");
+
+        List<SilentPaymentScanMatch> matches = SilentPaymentUtils.scanTransactionOutputs(scanPriv, spendPub, Set.of(1), tweakKey, tx.getOutputs());
+
+        Assertions.assertEquals(2, matches.size());
+        Assertions.assertEquals(1, matches.get(0).labelIndex());
+        Assertions.assertArrayEquals(Utils.hexToBytes("43100f89f1a6bf10081c92b473ffc57ceac7dbed600b6aba9bb3976f17dbb914"), matches.get(0).tweak());
+        Assertions.assertEquals(1, matches.get(1).labelIndex());
+        Assertions.assertArrayEquals(Utils.hexToBytes("9d5fd3b91cac9ddfea6fc2e6f9386f680e6cee623cda02f53706306c081de87f"), matches.get(1).tweak());
+    }
+
+    @Test
+    public void testScanChange() throws InvalidSilentPaymentException {
+        // BIP352 case 18 receiver 0: "Single recipient: use silent payments for sender change" — label 0.
+        // Note: label 0 (change) is implicit even when not in labelIndices; this test uses an empty set
+        // to verify the implicit subscription.
+        ECKey scanPriv = ECKey.fromPrivate(Utils.hexToBytes("11b7a82e06ca2648d5fded2366478078ec4fc9dc1d8ff487518226f229d768fd"));
+        ECKey spendPriv = ECKey.fromPrivate(Utils.hexToBytes("b8f87388cbb41934c50daca018901b00070a5ff6cc25a7e9e716a9d5b9e4d664"));
+        ECKey spendPub = ECKey.fromPublicOnly(spendPriv.getPubKey(true));
+        byte[] tweakKey = Utils.hexToBytes("0314bec14463d6c0181083d607fecfba67bb83f95915f6f247975ec566d5642ee8");
+        Transaction tx = txWithP2trOutputs("be368e28979d950245d742891ae6064020ba548c1e2e65a639a8bb0675d95cff",  // change (m=0)
+                "f207162b1a7abc51c42017bef055e9ec1efc3d3567cb720357e2b84325db33ac"); // unrelated (different recipient)
+
+        List<SilentPaymentScanMatch> matches = SilentPaymentUtils.scanTransactionOutputs(scanPriv, spendPub, Collections.emptySet(), tweakKey, tx.getOutputs());
+
+        Assertions.assertEquals(1, matches.size());
+        Assertions.assertEquals(0, matches.getFirst().outputIndex());
+        Assertions.assertEquals(0, matches.getFirst().labelIndex());
+        Assertions.assertArrayEquals(Utils.hexToBytes("80cd767ed20bd0bb7d8ea5e803f8c381293a62e8a073cf46fb0081da46e64e1f"), matches.getFirst().tweak());
+    }
+
+    @Test
+    public void testScanIgnoresUnrelatedOutputs() throws InvalidSilentPaymentException {
+        // BIP352 case 23: "Recipient ignores unrelated outputs" — both outputs are P2TR but neither
+        // pays this recipient. Verifies BIP352 termination at first non-matching k.
+        ECKey scanPriv = ECKey.fromPrivate(Utils.hexToBytes(STANDARD_SCAN_PRIV));
+        ECKey spendPub = standardSpendPub();
+        byte[] tweakKey = Utils.hexToBytes("0314bec14463d6c0181083d607fecfba67bb83f95915f6f247975ec566d5642ee8");
+        Transaction tx = txWithP2trOutputs("841792c33c9dc6193e76744134125d40add8f2f4a96475f28ba150be032d64e8", "782eeb913431ca6e9b8c2fd80a5f72ed2024ef72a3c6fb10263c379937323338");
+
+        List<SilentPaymentScanMatch> matches = SilentPaymentUtils.scanTransactionOutputs(scanPriv, spendPub, Collections.emptySet(), tweakKey, tx.getOutputs());
+
+        Assertions.assertTrue(matches.isEmpty());
+    }
+
+    @Test
+    public void testScanMatchedAndUnmatchedOutputs() throws InvalidSilentPaymentException {
+        // Synthetic: real match from case 0 + an unrelated P2TR output. Verifies the matched output
+        // is returned and the algorithm terminates after consuming it (rather than looping over the
+        // unmatched output indefinitely).
+        ECKey scanPriv = ECKey.fromPrivate(Utils.hexToBytes(STANDARD_SCAN_PRIV));
+        ECKey spendPub = standardSpendPub();
+        byte[] tweakKey = Utils.hexToBytes("024ac253c216532e961988e2a8ce266a447c894c781e52ef6cee902361db960004");
+        Transaction tx = txWithP2trOutputs("841792c33c9dc6193e76744134125d40add8f2f4a96475f28ba150be032d64e8",  // unrelated
+                "3e9fce73d4e77a4809908e3c3a2e54ee147b9312dc5044a193d1fc85de46e3c1"); // case 0 match
+
+        List<SilentPaymentScanMatch> matches = SilentPaymentUtils.scanTransactionOutputs(scanPriv, spendPub, Collections.emptySet(), tweakKey, tx.getOutputs());
+
+        Assertions.assertEquals(1, matches.size());
+        Assertions.assertEquals(1, matches.getFirst().outputIndex());
+        Assertions.assertNull(matches.getFirst().labelIndex());
+        Assertions.assertArrayEquals(Utils.hexToBytes("f438b40179a3c4262de12986c0e6cce0634007cdc79c1dcd3e20b9ebc2e7eef6"), matches.getFirst().tweak());
+    }
+
+    @Test
+    public void testScanInvalidTweakKey() {
+        ECKey scanPriv = ECKey.fromPrivate(Utils.hexToBytes(STANDARD_SCAN_PRIV));
+        ECKey spendPub = standardSpendPub();
+        Transaction tx = txWithP2trOutputs("3e9fce73d4e77a4809908e3c3a2e54ee147b9312dc5044a193d1fc85de46e3c1");
+
+        // Wrong length
+        Assertions.assertThrows(IllegalArgumentException.class, () -> SilentPaymentUtils.scanTransactionOutputs(scanPriv, spendPub, Collections.emptySet(), new byte[32], tx.getOutputs()));
+
+        // Right length but not on curve
+        byte[] notOnCurve = new byte[33];
+        notOnCurve[0] = 0x02;
+        Assertions.assertThrows(IllegalArgumentException.class, () -> SilentPaymentUtils.scanTransactionOutputs(scanPriv, spendPub, Collections.emptySet(), notOnCurve, tx.getOutputs()));
+    }
+
+    @Test
+    public void testScanEmptyOutputs() throws InvalidSilentPaymentException {
+        ECKey scanPriv = ECKey.fromPrivate(Utils.hexToBytes(STANDARD_SCAN_PRIV));
+        ECKey spendPub = standardSpendPub();
+        byte[] tweakKey = Utils.hexToBytes("024ac253c216532e961988e2a8ce266a447c894c781e52ef6cee902361db960004");
+
+        List<SilentPaymentScanMatch> matches = SilentPaymentUtils.scanTransactionOutputs(scanPriv, spendPub, Collections.emptySet(), tweakKey, Collections.emptyList());
+
+        Assertions.assertTrue(matches.isEmpty());
+    }
+
+    @Test
+    public void testScanNonP2trOutputs() throws InvalidSilentPaymentException {
+        // A transaction with only a P2WPKH output should produce no matches and no error.
+        ECKey scanPriv = ECKey.fromPrivate(Utils.hexToBytes(STANDARD_SCAN_PRIV));
+        ECKey spendPub = standardSpendPub();
+        byte[] tweakKey = Utils.hexToBytes("024ac253c216532e961988e2a8ce266a447c894c781e52ef6cee902361db960004");
+
+        Transaction tx = new Transaction();
+        ECKey randomKey = ECKey.fromPublicOnly(Utils.hexToBytes("025a1e61f898173040e20616d43e9f496fba90338a39faa1ed98fcbaeee4dd9be5"));
+        tx.addOutput(0L, ScriptType.P2WPKH.getOutputScript(PolicyType.SINGLE_HD, randomKey));
+
+        List<SilentPaymentScanMatch> matches = SilentPaymentUtils.scanTransactionOutputs(scanPriv, spendPub, Collections.emptySet(), tweakKey, tx.getOutputs());
+
+        Assertions.assertTrue(matches.isEmpty());
+    }
+
+    @Test
+    public void testScanKMaxCap() throws InvalidSilentPaymentException {
+        // BIP352 case 27: a malicious sender constructs a transaction with K_MAX+1 outputs all
+        // paying this recipient. The receiver must stop after K_MAX matches and ignore any further
+        // candidates to bound DoS exposure. The vector doesn't enumerate the 2324 outputs, so we
+        // synthesize the equivalent scenario by deriving K_MAX+1 unlabeled SP output keys against
+        // case 0's recipient via the sender-side BIP352 math, then verify the scan returns exactly
+        // K_MAX matches in order.
+        ECKey scanPriv = ECKey.fromPrivate(Utils.hexToBytes(STANDARD_SCAN_PRIV));
+        ECKey spendPub = standardSpendPub();
+        byte[] tweakKey = Utils.hexToBytes("024ac253c216532e961988e2a8ce266a447c894c781e52ef6cee902361db960004");
+
+        ECKey tweakKeyPoint = ECKey.fromPublicOnly(tweakKey);
+        ECKey sharedSecret = tweakKeyPoint.multiply(scanPriv.getPrivKey(), true);
+        byte[] sharedSecretCompressed = sharedSecret.getPubKey(true);
+        Transaction tx = new Transaction();
+        for(int k = 0; k <= SilentPaymentUtils.K_MAX; k++) {
+            byte[] tkBytes = Utils.taggedHash(SilentPaymentUtils.BIP_0352_SHARED_SECRET_TAG,
+                    Utils.concat(sharedSecretCompressed, ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(k).array()));
+            ECKey pkm = spendPub.add(ECKey.fromPrivate(new BigInteger(1, tkBytes)), true);
+            tx.addOutput(0L, ScriptType.P2TR.getOutputScript(pkm.getPubKeyXCoord()));
+        }
+
+        List<SilentPaymentScanMatch> matches = SilentPaymentUtils.scanTransactionOutputs(scanPriv, spendPub, Collections.emptySet(), tweakKey, tx.getOutputs());
+
+        Assertions.assertEquals(SilentPaymentUtils.K_MAX, matches.size());
+        Assertions.assertEquals(0, matches.get(0).outputIndex());
+        Assertions.assertArrayEquals(Utils.hexToBytes("f438b40179a3c4262de12986c0e6cce0634007cdc79c1dcd3e20b9ebc2e7eef6"), matches.get(0).tweak());
+        Assertions.assertEquals(SilentPaymentUtils.K_MAX - 1, matches.getLast().outputIndex());
+    }
+
+    @Test
+    public void testScanFalsePositiveTweakKey() throws InvalidSilentPaymentException {
+        // Use case 0's tweakKey with case 23's outputs (different recipient/output set).
+        // The receiver should derive no matches and terminate at the first non-matching k.
+        ECKey scanPriv = ECKey.fromPrivate(Utils.hexToBytes(STANDARD_SCAN_PRIV));
+        ECKey spendPub = standardSpendPub();
+        byte[] tweakKey = Utils.hexToBytes("024ac253c216532e961988e2a8ce266a447c894c781e52ef6cee902361db960004");
+        Transaction tx = txWithP2trOutputs("841792c33c9dc6193e76744134125d40add8f2f4a96475f28ba150be032d64e8", "782eeb913431ca6e9b8c2fd80a5f72ed2024ef72a3c6fb10263c379937323338");
+
+        List<SilentPaymentScanMatch> matches = SilentPaymentUtils.scanTransactionOutputs(scanPriv, spendPub, Collections.emptySet(), tweakKey, tx.getOutputs());
+
+        Assertions.assertTrue(matches.isEmpty());
+    }
+
+    private static final String VERIFY_TEST_SEED = "absent essay fox snake vast pumpkin height crouch silent bulb excuse razor";
+    private static final String VERIFY_TEST_SP_ADDRESS = "sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv";
+    private static final long VERIFY_INPUT_VALUE = 100_000L;
+    private static final long VERIFY_OUTPUT_VALUE = 50_000L;
+
+    @Test
+    public void testVerifyValidPsbt() throws Exception {
+        Wallet wallet = buildVerifyWallet();
+        WalletNode receiveNode = primeReceiveNode(wallet, 0);
+        PSBT psbt = buildVerifySendingPsbt(receiveNode);
+
+        Map<PSBTInput, WalletNode> signingNodes = wallet.getSigningNodes(psbt);
+        Assertions.assertEquals(1, signingNodes.size(), "Wallet should recognize its own input");
+        wallet.computeSilentPaymentOutputs(psbt, signingNodes);
+
+        Map<Address, SilentPaymentAddress> verified = wallet.verifySilentPaymentOutputs(psbt);
+        Assertions.assertEquals(1, verified.size(), "A legitimately constructed SP PSBT must verify");
+        Assertions.assertEquals(SilentPaymentAddress.from(VERIFY_TEST_SP_ADDRESS), verified.values().iterator().next());
+    }
+
+    @Test
+    public void testVerifyRejectsNoProof() throws Exception {
+        Wallet wallet = buildVerifyWallet();
+        WalletNode receiveNode = primeReceiveNode(wallet, 0);
+        PSBT psbt = buildVerifySendingPsbt(receiveNode);
+
+        byte[] arbitraryXOnly = new byte[32];
+        new SecureRandom().nextBytes(arbitraryXOnly);
+        psbt.getPsbtOutputs().get(0).setScript(ScriptType.P2TR.getOutputScript(arbitraryXOnly));
+
+        Map<Address, SilentPaymentAddress> verified = wallet.verifySilentPaymentOutputs(psbt);
+        Assertions.assertTrue(verified.isEmpty(), "Poisoned PSBT without BIP-375 metadata must be rejected");
+    }
+
+    @Test
+    public void testVerifyRejectsForgedShare() throws Exception {
+        Wallet wallet = buildVerifyWallet();
+        WalletNode receiveNode = primeReceiveNode(wallet, 0);
+        PSBT psbt = buildVerifySendingPsbt(receiveNode);
+
+        Map<PSBTInput, WalletNode> signingNodes = wallet.getSigningNodes(psbt);
+        wallet.computeSilentPaymentOutputs(psbt, signingNodes);
+
+        Map.Entry<ECKey, ECKey> shareEntry = psbt.getSilentPaymentsEcdhShares().entrySet().iterator().next();
+        ECKey forged = ECKey.fromPublicOnly(ECKey.fromPrivate(Sha256Hash.hash("forged".getBytes())).getPubKey());
+        psbt.getSilentPaymentsEcdhShares().put(shareEntry.getKey(), forged);
+
+        Map<Address, SilentPaymentAddress> verified = wallet.verifySilentPaymentOutputs(psbt);
+        Assertions.assertTrue(verified.isEmpty(), "Forged ECDH share must fail DLEQ verification");
+    }
+
+    @Test
+    public void testVerifyRejectsMutatedScript() throws Exception {
+        Wallet wallet = buildVerifyWallet();
+        WalletNode receiveNode = primeReceiveNode(wallet, 0);
+        PSBT psbt = buildVerifySendingPsbt(receiveNode);
+
+        Map<PSBTInput, WalletNode> signingNodes = wallet.getSigningNodes(psbt);
+        wallet.computeSilentPaymentOutputs(psbt, signingNodes);
+
+        byte[] mutatedXOnly = new byte[32];
+        new SecureRandom().nextBytes(mutatedXOnly);
+        psbt.getPsbtOutputs().get(0).setScript(ScriptType.P2TR.getOutputScript(mutatedXOnly));
+
+        Map<Address, SilentPaymentAddress> verified = wallet.verifySilentPaymentOutputs(psbt);
+        Assertions.assertTrue(verified.isEmpty(), "Output script that doesn't derive from the claimed SP address must be rejected");
+    }
+
+    @Test
+    public void testVerifyAbortsMidSign() throws Exception {
+        Wallet wallet = buildVerifyWallet();
+        WalletNode receiveNode = primeReceiveNode(wallet, 0);
+        PSBT psbt = buildVerifySendingPsbt(receiveNode);
+
+        Map<Address, SilentPaymentAddress> verified = wallet.verifySilentPaymentOutputs(psbt);
+        Assertions.assertTrue(verified.isEmpty(), "Mid-sign PSBT must abort all-or-nothing without persisting");
+    }
+
+    @Test
+    public void testVerifyRejectsForeignInput() throws Exception {
+        Wallet wallet = buildVerifyWallet();
+        WalletNode receiveNode = primeReceiveNode(wallet, 0);
+        PSBT psbt = buildVerifySendingPsbt(receiveNode);
+
+        byte[] foreignXOnly = new byte[32];
+        new SecureRandom().nextBytes(foreignXOnly);
+        Script foreignScript = ScriptType.P2TR.getOutputScript(foreignXOnly);
+        psbt.getPsbtInputs().get(0).setWitnessUtxo(new TransactionOutput(null, VERIFY_INPUT_VALUE, foreignScript));
+
+        Map<Address, SilentPaymentAddress> verified = wallet.verifySilentPaymentOutputs(psbt);
+        Assertions.assertTrue(verified.isEmpty(), "PSBT whose inputs aren't from this wallet must be rejected");
+    }
+
+    @Test
+    public void testVerifyEmptyPsbt() throws Exception {
+        Wallet wallet = buildVerifyWallet();
+        primeReceiveNode(wallet, 0);
+
+        Transaction tx = new Transaction();
+        tx.setVersion(2);
+        PSBT psbt = new PSBT(tx);
+
+        Map<Address, SilentPaymentAddress> verified = wallet.verifySilentPaymentOutputs(psbt);
+        Assertions.assertTrue(verified.isEmpty(), "PSBT with no SP outputs returns empty by definition");
+    }
+
+    @Test
+    public void testVerifyRejectsMissingProof() throws Exception {
+        Wallet wallet = buildVerifyWallet();
+        WalletNode receiveNode = primeReceiveNode(wallet, 0);
+        PSBT psbt = buildVerifySendingPsbt(receiveNode);
+
+        Map<PSBTInput, WalletNode> signingNodes = wallet.getSigningNodes(psbt);
+        wallet.computeSilentPaymentOutputs(psbt, signingNodes);
+
+        psbt.getSilentPaymentsDLEQProofs().clear();
+
+        Map<Address, SilentPaymentAddress> verified = wallet.verifySilentPaymentOutputs(psbt);
+        Assertions.assertTrue(verified.isEmpty(), "Missing DLEQ proof must cause rejection");
+    }
+
+    @Test
+    public void testVerifyRejectsPartiallyResolvedOutputs() throws Exception {
+        Wallet wallet = buildVerifyWallet();
+        WalletNode receiveNode = primeReceiveNode(wallet, 0);
+        PSBT psbt = buildVerifySendingPsbt(receiveNode, 2);
+
+        Map<PSBTInput, WalletNode> signingNodes = wallet.getSigningNodes(psbt);
+        wallet.computeSilentPaymentOutputs(psbt, signingNodes);
+        Script firstScript = psbt.getPsbtOutputs().getFirst().getScript();
+
+        //A counterparty resolves the second output only, giving it the script of the first - the BIP-352 output index would otherwise restart at zero
+        psbt.getPsbtOutputs().getFirst().setScript(null);
+        psbt.getPsbtOutputs().get(1).setScript(firstScript);
+
+        InvalidSilentPaymentException ex = Assertions.assertThrows(InvalidSilentPaymentException.class,
+                () -> wallet.verifySilentPaymentScripts(psbt, signingNodes), "Partially resolved silent payment outputs must be rejected");
+        Assertions.assertTrue(ex.getMessage().contains("all resolved or all unresolved"));
+
+        Assertions.assertThrows(InvalidSilentPaymentException.class, () -> wallet.computeSilentPaymentOutputs(psbt, signingNodes),
+                "Computing the remaining outputs would give both outputs the same script");
+    }
+
+    @Test
+    public void testComputeRejectsInjectedSpInfo() throws Exception {
+        Wallet wallet = buildVerifyWallet();
+        WalletNode receiveNode = primeReceiveNode(wallet, 0);
+        PSBT psbt = buildVerifySendingPsbt(receiveNode);
+
+        byte[] baitXOnly = new byte[32];
+        new SecureRandom().nextBytes(baitXOnly);
+        Script baitScript = ScriptType.P2TR.getOutputScript(baitXOnly);
+        psbt.getPsbtOutputs().getFirst().setScript(baitScript);
+
+        Map<PSBTInput, WalletNode> signingNodes = wallet.getSigningNodes(psbt);
+        Assertions.assertThrows(InvalidSilentPaymentException.class, () -> wallet.computeSilentPaymentOutputs(psbt, signingNodes),
+                "Injected PSBT_OUT_SP_V0_INFO without valid BIP-375 proofs must abort signing");
+        Assertions.assertArrayEquals(baitScript.getProgram(), psbt.getPsbtOutputs().get(0).getScript().getProgram(),
+                "Visible output script must not be mutated when SP metadata fails verification");
+    }
+
+    @Test
+    public void testVerifyRejectsStrippedProofsForFinalizingWallet() throws Exception {
+        Wallet wallet = buildVerifyWallet();
+        WalletNode receiveNode = primeReceiveNode(wallet, 0);
+        PSBT psbt = buildVerifySendingPsbt(receiveNode);
+
+        Map<PSBTInput, WalletNode> signingNodes = wallet.getSigningNodes(psbt);
+        wallet.computeSilentPaymentOutputs(psbt, signingNodes);
+        wallet.sign(signingNodes);
+
+        psbt.getSilentPaymentsEcdhShares().clear();
+        psbt.getSilentPaymentsDLEQProofs().clear();
+
+        Assertions.assertTrue(wallet.verifySilentPaymentOutputs(psbt).isEmpty(), "Stripped BIP-375 metadata must not be learned as a verified silent payment");
+        //A wallet derived from the signed PSBT has no keys to verify against, so it must not learn the claimed addresses either
+        Wallet finalizingWallet = new FinalizingPSBTWallet(psbt);
+        Assertions.assertTrue(finalizingWallet.verifySilentPaymentOutputs(psbt).isEmpty(), "A wallet derived from a signed PSBT cannot verify its silent payment outputs");
+    }
+
+    @Test
+    public void testComputeRejectsInjectedNonAddressScript() throws Exception {
+        Wallet wallet = buildVerifyWallet();
+        WalletNode receiveNode = primeReceiveNode(wallet, 0);
+        PSBT psbt = buildVerifySendingPsbt(receiveNode);
+
+        //A script that does not parse as an address is still a resolved script, and must be proven rather than replaced by the computed one
+        Script baitScript = new Script(Utils.hexToBytes("6a0568656c6c6f"));
+        psbt.getPsbtOutputs().getFirst().setScript(baitScript);
+
+        Map<PSBTInput, WalletNode> signingNodes = wallet.getSigningNodes(psbt);
+        Assertions.assertThrows(InvalidSilentPaymentException.class, () -> wallet.computeSilentPaymentOutputs(psbt, signingNodes),
+                "Injected PSBT_OUT_SP_V0_INFO without valid BIP-375 proofs must abort signing");
+        Assertions.assertArrayEquals(baitScript.getProgram(), psbt.getPsbtOutputs().getFirst().getScript().getProgram(),
+                "Visible output script must not be mutated when SP metadata fails verification");
+    }
+
+    @Test
+    public void testComputePreservesScriptForVerifiedPsbt() throws Exception {
+        Wallet wallet = buildVerifyWallet();
+        WalletNode receiveNode = primeReceiveNode(wallet, 0);
+        PSBT psbt = buildVerifySendingPsbt(receiveNode);
+
+        Map<PSBTInput, WalletNode> signingNodes = wallet.getSigningNodes(psbt);
+        wallet.computeSilentPaymentOutputs(psbt, signingNodes);
+        byte[] computedScript = psbt.getPsbtOutputs().getFirst().getScript().getProgram();
+
+        wallet.computeSilentPaymentOutputs(psbt, signingNodes);
+        Assertions.assertArrayEquals(computedScript, psbt.getPsbtOutputs().getFirst().getScript().getProgram(),
+                "Already-computed and proof-backed SP output script must be preserved by a subsequent compute call");
+    }
+
+    private static Wallet buildVerifyWallet() throws Exception {
+        DeterministicSeed seed = new DeterministicSeed(VERIFY_TEST_SEED, "", 0, DeterministicSeed.Type.BIP39);
+        Wallet wallet = new Wallet();
+        wallet.setPolicyType(PolicyType.SINGLE_HD);
+        wallet.setScriptType(ScriptType.P2WPKH);
+        Keystore keystore = Keystore.fromSeed(seed, PolicyType.SINGLE_HD, ScriptType.P2WPKH.getDefaultDerivation());
+        wallet.getKeystores().add(keystore);
+        wallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2WPKH, wallet.getKeystores(), 1));
+
+        return wallet;
+    }
+
+    private static WalletNode primeReceiveNode(Wallet wallet, int index) {
+        WalletNode node = new WalletNode(wallet, KeyPurpose.RECEIVE, index);
+        TreeSet<WalletNode> children = new TreeSet<>();
+        children.add(node);
+        wallet.getNode(KeyPurpose.RECEIVE).setChildren(children);
+
+        return node;
+    }
+
+    private static PSBT buildVerifySendingPsbt(WalletNode receiveNode) {
+        return buildVerifySendingPsbt(receiveNode, 1);
+    }
+
+    private static PSBT buildVerifySendingPsbt(WalletNode receiveNode, int silentPaymentOutputs) {
+        Script inputScript = receiveNode.getOutputScript();
+
+        Transaction tx = new Transaction();
+        tx.setVersion(2);
+        tx.addInput(Sha256Hash.wrap("0000000000000000000000000000000000000000000000000000000000000001"), 0, new Script(new byte[0]));
+        for(int i = 0; i < silentPaymentOutputs; i++) {
+            tx.addOutput(VERIFY_OUTPUT_VALUE, new Script(new byte[0]));
+        }
+
+        PSBT psbt = new PSBT(tx);
+        psbt.getPsbtInputs().get(0).setWitnessUtxo(new TransactionOutput(null, VERIFY_INPUT_VALUE, inputScript));
+        for(int i = 0; i < silentPaymentOutputs; i++) {
+            psbt.getPsbtOutputs().get(i).setSilentPaymentAddress(SilentPaymentAddress.from(VERIFY_TEST_SP_ADDRESS));
+        }
+
+        return psbt;
     }
 }

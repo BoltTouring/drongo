@@ -5,6 +5,7 @@ import com.sparrowwallet.drongo.crypto.ChildNumber;
 import com.sparrowwallet.drongo.crypto.DeterministicKey;
 import com.sparrowwallet.drongo.crypto.ECKey;
 import com.sparrowwallet.drongo.crypto.HDKeyDerivation;
+import com.sparrowwallet.drongo.policy.PolicyType;
 import com.sparrowwallet.drongo.protocol.*;
 import com.sparrowwallet.drongo.wallet.Keystore;
 import org.slf4j.Logger;
@@ -82,7 +83,7 @@ public class PaymentCode {
     }
 
     public Address getNotificationAddress() {
-        return ScriptType.P2PKH.getAddress(getNotificationKey());
+        return ScriptType.P2PKH.getAddress(PolicyType.SINGLE_HD, getNotificationKey());
     }
 
     public ECKey getKey(int index) {
@@ -176,10 +177,10 @@ public class PaymentCode {
         if(scriptChunks.get(0).getOpcode() != ScriptOpCodes.OP_RETURN) {
             return null;
         }
-        if(scriptChunks.get(1).getData() != null && scriptChunks.get(1).getData().length != 80) {
+        byte[] data = scriptChunks.get(1).getData();
+        if(data == null || data.length != PAYLOAD_LEN) {
             return null;
         }
-        byte[] data = scriptChunks.get(1).getData();
         if(data[0] != 0x01 || (data[2] != 0x02 && data[2] != 0x03)) {
             return null;
         }
@@ -223,8 +224,18 @@ public class PaymentCode {
     }
 
     private Map<byte[], byte[]> parse() throws InvalidPaymentCodeException {
-        byte[] pcBytes = Base58.decodeChecked(strPaymentCode);
+        if(strPaymentCode == null) {
+            throw new InvalidPaymentCodeException("Payment code is null");
+        }
 
+        try {
+            return parse(Base58.decodeChecked(strPaymentCode));
+        } catch(ProtocolException | BufferUnderflowException e) {
+            throw new InvalidPaymentCodeException("Invalid payment code", e);
+        }
+    }
+
+    private Map<byte[], byte[]> parse(byte[] pcBytes) throws InvalidPaymentCodeException {
         ByteBuffer bb = ByteBuffer.wrap(pcBytes);
         if(bb.get() != 0x47) {
             throw new InvalidPaymentCodeException("Invalid payment code version");
@@ -257,15 +268,15 @@ public class PaymentCode {
         byte[] payment_code = new byte[PAYLOAD_LEN + 1];
 
         for(int i = 0; i < payload.length; i++) {
-            payload[i] = (byte) 0x00;
+            payload[i] = (byte)0x00;
         }
 
         // byte 0: type.
-        payload[0] = (byte) type;
+        payload[0] = (byte)type;
         // byte 1: features bit field. All bits must be zero except where specified elsewhere in this specification
         //      bit 0: Bitmessage notification
         //      bits 1-7: reserved
-        payload[1] = (byte) 0x00;
+        payload[1] = (byte)0x00;
 
         // replace sign & x code (33 bytes)
         System.arraycopy(pubkey, 0, payload, PUBLIC_KEY_Y_OFFSET, pubkey.length);
@@ -273,7 +284,7 @@ public class PaymentCode {
         System.arraycopy(chain, 0, payload, CHAIN_OFFSET, chain.length);
 
         // add version byte
-        payment_code[0] = (byte) 0x47;
+        payment_code[0] = (byte)0x47;
         System.arraycopy(payload, 0, payment_code, 1, payload.length);
 
         // append checksum
@@ -286,7 +297,7 @@ public class PaymentCode {
         payload[SAMOURAI_FEATURE_BYTE] = setBit(payload[SAMOURAI_FEATURE_BYTE], SAMOURAI_SEGWIT_BIT);
         byte[] payment_code = new byte[PAYLOAD_LEN + 1];
         // add version byte
-        payment_code[0] = (byte) 0x47;
+        payment_code[0] = (byte)0x47;
         System.arraycopy(payload, 0, payment_code, 1, payload.length);
 
         // append checksum
@@ -308,7 +319,7 @@ public class PaymentCode {
     }
 
     private byte setBit(byte b, int pos) {
-        return (byte) (b | (1 << pos));
+        return (byte)(b | (1 << pos));
     }
 
     private DeterministicKey createMasterPubKeyFromBytes() {
@@ -368,7 +379,7 @@ public class PaymentCode {
             return false;
         }
 
-        PaymentCode that = (PaymentCode) o;
+        PaymentCode that = (PaymentCode)o;
         return strPaymentCode.equals(that.strPaymentCode);
     }
 

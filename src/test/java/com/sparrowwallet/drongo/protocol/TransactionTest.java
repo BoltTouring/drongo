@@ -5,16 +5,156 @@ import com.sparrowwallet.drongo.address.Address;
 import com.sparrowwallet.drongo.address.InvalidAddressException;
 import com.sparrowwallet.drongo.crypto.ECKey;
 import com.sparrowwallet.drongo.crypto.SchnorrSignature;
+import com.sparrowwallet.drongo.policy.PolicyType;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
 
 public class TransactionTest {
+    @Test
+    public void truncatedTransactionThrowsProtocolException() {
+        //The segwit marker was peeked with an unguarded array access, giving an ArrayIndexOutOfBoundsException
+        Assertions.assertThrows(ProtocolException.class, () -> new Transaction(new byte[4]));
+
+        byte[] serialized = Utils.hexToBytes(TWO_OUTPUT_TX);
+        for(int length = 0; length < serialized.length; length++) {
+            byte[] truncated = Arrays.copyOf(serialized, length);
+            Assertions.assertThrows(ProtocolException.class, () -> new Transaction(truncated), "Truncating to " + length + "/" + serialized.length + " bytes must be rejected");
+        }
+    }
+
+    @Test
+    public void scriptLengthBeyondIntRangeThrowsProtocolException() {
+        //A script length of 0x80000000 was cast to a negative int, which passed both guards in Message.readBytes
+        //and gave a NegativeArraySizeException from the allocation that followed
+        String scriptLenBeyondIntRange = "0200000001" + PREV_TXID + "01000000" + "fe00000080" + "ffffffff" + "0000000000";
+        Exception e = Assertions.assertThrows(ProtocolException.class, () -> new Transaction(Utils.hexToBytes(scriptLenBeyondIntRange)));
+        Assertions.assertTrue(e.getMessage().contains("Claimed value length too large: 2147483648"), e.getMessage());
+    }
+
+    @Test
+    public void inputCountBeyondIntRangeThrowsProtocolException() {
+        //An input count in the top half of the int range sized the initial array with a negative capacity,
+        //giving an IllegalArgumentException from ArrayList rather than a ProtocolException
+        String inputCountBeyondIntRange = "02000000" + "fe00000080";
+        Assertions.assertThrows(ProtocolException.class, () -> new Transaction(Utils.hexToBytes(inputCountBeyondIntRange)));
+
+        String outputCountBeyondIntRange = "02000000" + "01" + PREV_TXID + "01000000" + "00" + "ffffffff" + "fe00000080";
+        Assertions.assertThrows(ProtocolException.class, () -> new Transaction(Utils.hexToBytes(outputCountBeyondIntRange)));
+    }
+
+    @Test
+    public void witnessPushCountBeyondIntRangeThrowsProtocolException() {
+        //A witness push size was cast to a negative int before being read
+        String pushSizeBeyondIntRange = "02000000" + "0001" + "01" + PREV_TXID + "01000000" + "00" + "ffffffff" +
+                "01" + "3930000000000000" + "1976a914000000000000000000000000000000000000000088ac" +
+                "01" + "fe00000080";
+        Assertions.assertThrows(ProtocolException.class, () -> new Transaction(Utils.hexToBytes(pushSizeBeyondIntRange)));
+    }
+
+    @Test
+    public void trailingBytesAfterTransactionAreRejected() {
+        //A flipped byte could leave the tail of the payload unparsed, giving a transaction the caller never supplied
+        Assertions.assertThrows(ProtocolException.class, () -> new Transaction(Utils.hexToBytes(TWO_OUTPUT_TX + "00")));
+        Assertions.assertDoesNotThrow(() -> new Transaction(Utils.hexToBytes(TWO_OUTPUT_TX)), "The exact serialization must still parse");
+    }
+
+    @Test
+    public void verifyRejectsExcessiveTotalOutputValue() {
+        //Each output was range checked, but only an overflow of the sum was caught
+        Transaction tx = new Transaction();
+        tx.addInput(Sha256Hash.wrap(Utils.hexToBytes(PREV_TXID)), 0, new Script(new byte[0]));
+        tx.addOutput(Transaction.MAX_SATOSHIS - 1, new Script(Utils.hexToBytes(P2PKH_SCRIPT)));
+        tx.addOutput(Transaction.MAX_SATOSHIS - 1, new Script(Utils.hexToBytes(P2PKH_SCRIPT)));
+
+        Assertions.assertThrows(VerificationException.ExcessiveValue.class, tx::verify);
+    }
+
+    @Test
+    public void feeIsDerivedFromTheFundingTransactions() {
+        Transaction funding = fundingTransaction(60000L, 40000L);
+        Transaction spending = new Transaction();
+        spending.addInput(funding.getTxId(), 0, new Script(new byte[0]));
+        spending.addInput(funding.getTxId(), 1, new Script(new byte[0]));
+        spending.addOutput(99800L, new Script(Utils.hexToBytes(P2PKH_SCRIPT)));
+
+        Assertions.assertEquals(200L, spending.getFee(Map.of(funding.getTxId(), funding)::get));
+    }
+
+    @Test
+    public void feeIsNullWhereAFundingTransactionIsMissing() {
+        Transaction funding = fundingTransaction(60000L, 40000L);
+        Transaction spending = new Transaction();
+        spending.addInput(funding.getTxId(), 0, new Script(new byte[0]));
+        spending.addInput(Sha256Hash.wrap(PREV_TXID), 0, new Script(new byte[0]));
+        spending.addOutput(59800L, new Script(Utils.hexToBytes(P2PKH_SCRIPT)));
+
+        //A fee that is asserted rather than worked out is what this replaces, so a partly known input set must not produce one
+        Assertions.assertNull(spending.getFee(Map.of(funding.getTxId(), funding)::get));
+    }
+
+    @Test
+    public void feeIsNullWhereAFundingTransactionDoesNotHaveTheOutput() {
+        Transaction funding = fundingTransaction(60000L, 40000L);
+        Transaction spending = new Transaction();
+        spending.addInput(funding.getTxId(), 2, new Script(new byte[0]));
+        spending.addOutput(59800L, new Script(Utils.hexToBytes(P2PKH_SCRIPT)));
+
+        Assertions.assertNull(spending.getFee(Map.of(funding.getTxId(), funding)::get));
+    }
+
+    @Test
+    public void feeIsNullWhereTheOutputsExceedTheInputs() {
+        Transaction funding = fundingTransaction(60000L, 40000L);
+        Transaction spending = new Transaction();
+        spending.addInput(funding.getTxId(), 0, new Script(new byte[0]));
+        spending.addOutput(60001L, new Script(Utils.hexToBytes(P2PKH_SCRIPT)));
+
+        //Only a funding transaction that is not the one the input names can produce this, so there is no fee to report
+        Assertions.assertNull(spending.getFee(Map.of(funding.getTxId(), funding)::get));
+    }
+
+    @Test
+    public void feeIsNullWhereTheInputValuesOverflow() {
+        Transaction funding = fundingTransaction(Long.MAX_VALUE, Long.MAX_VALUE);
+        Transaction spending = new Transaction();
+        spending.addInput(funding.getTxId(), 0, new Script(new byte[0]));
+        spending.addInput(funding.getTxId(), 1, new Script(new byte[0]));
+        spending.addOutput(1000L, new Script(Utils.hexToBytes(P2PKH_SCRIPT)));
+
+        Assertions.assertNull(spending.getFee(Map.of(funding.getTxId(), funding)::get));
+    }
+
+    @Test
+    public void coinbaseTransactionPaysNoFee() {
+        Transaction coinbase = new Transaction();
+        coinbase.addInput(Sha256Hash.ZERO_HASH, 0xFFFFFFFFL, new Script(new byte[0]));
+        coinbase.addOutput(312500000L, new Script(Utils.hexToBytes(P2PKH_SCRIPT)));
+
+        //Nothing funds a coinbase input, so the derivation must not read its absence as an unknown fee
+        Assertions.assertEquals(0L, coinbase.getFee(txid -> null));
+    }
+
+    private Transaction fundingTransaction(long... values) {
+        Transaction funding = new Transaction();
+        funding.addInput(Sha256Hash.wrap(PREV_TXID), 0, new Script(new byte[0]));
+        for(long value : values) {
+            funding.addOutput(value, new Script(Utils.hexToBytes(P2PKH_SCRIPT)));
+        }
+
+        return funding;
+    }
+
+    private static final String P2PKH_SCRIPT = "76a914000000000000000000000000000000000000000088ac";
+    private static final String PREV_TXID = "aa00000000000000000000000000000000000000000000000000000000000011";
+    private static final String TWO_OUTPUT_TX = "0100000002fff7f7881a8099afa6940d42d1e7f6362bec38171ea3edf433541db4e4ad969f0000000000eeffffffef51e1b804cc89d182d279655c3aa89e815b1b309fe287d9b2b55d57b90ec68a0100000000ffffffff02202cb206000000001976a9148280b37df378db99f66f85c95a783a76ac7a6d5988ac9093510d000000001976a9143bde42dbee7e4dbe6a21b2d50ce2f0167faa815988ac11000000";
+
     @Test
     public void verifyP2WPKH() {
         String hex = "0100000002fff7f7881a8099afa6940d42d1e7f6362bec38171ea3edf433541db4e4ad969f0000000000eeffffffef51e1b804cc89d182d279655c3aa89e815b1b309fe287d9b2b55d57b90ec68a0100000000ffffffff02202cb206000000001976a9148280b37df378db99f66f85c95a783a76ac7a6d5988ac9093510d000000001976a9143bde42dbee7e4dbe6a21b2d50ce2f0167faa815988ac11000000";
@@ -228,7 +368,7 @@ public class TransactionTest {
         TransactionSignature signature0 = input0.getScriptSig().getChunks().get(0).getSignature();
 
         Transaction transaction = new Transaction();
-        spent0ScriptType.addSpendingInput(transaction, spent0Output, key0, signature0);
+        spent0ScriptType.addSpendingInput(PolicyType.SINGLE_HD, transaction, spent0Output, key0, signature0);
 
         transaction.addOutput(3000000000L, Address.fromString("1GWUbNagGsvpwygRCjoczegGVDvpm5fLV8"));
         transaction.addOutput(2000000000L, Address.fromString("19jCd38mHkNcXiGF4AjUCoJBSo7iqqjRHT"));
@@ -270,8 +410,8 @@ public class TransactionTest {
         ECKey pubKey1 = input1.getScriptSig().getChunks().get(1).getPubKey();
 
         Transaction transaction = new Transaction();
-        spent0ScriptType.addSpendingInput(transaction, spent0Output, pubKey0, signature0);
-        spent1ScriptType.addSpendingInput(transaction, spent1Output, pubKey1, signature1);
+        spent0ScriptType.addSpendingInput(PolicyType.SINGLE_HD, transaction, spent0Output, pubKey0, signature0);
+        spent1ScriptType.addSpendingInput(PolicyType.SINGLE_HD, transaction, spent1Output, pubKey1, signature1);
 
         transaction.addOutput(922, Address.fromString("1JVsQ4L4HAcn58Gj5uF16dvgFNdVTarY6i"));
         transaction.addOutput(9984568, Address.fromString("1Q7CEaM3CQ6ejGHgDZNbdTTAkoLcPk63nQ"));
@@ -311,7 +451,7 @@ public class TransactionTest {
         pubKeySignatures.put(key2, null);
 
         Transaction transaction = new Transaction();
-        spent0ScriptType.addMultisigSpendingInput(transaction, spent0Output, 2, pubKeySignatures);
+        spent0ScriptType.addMultisigSpendingInput(PolicyType.MULTI_HD, transaction, spent0Output, 2, pubKeySignatures);
 
         transaction.addOutput(833300, Address.fromString("31mKrRn3xQoGppLY5dU92Dbm4kN4ddkknE"));
         transaction.addOutput(1222480000, Address.fromString("1CL9kj1seXif6agPfeh6vpKkzc2Hxq1UpM"));
@@ -347,7 +487,7 @@ public class TransactionTest {
 
         Transaction transaction = new Transaction();
         transaction.setSegwitFlag(1);
-        TransactionInput input = ScriptType.P2SH_P2WPKH.addSpendingInput(transaction, spent0Output, pubKey0, signature0);
+        TransactionInput input = ScriptType.P2SH_P2WPKH.addSpendingInput(PolicyType.SINGLE_HD, transaction, spent0Output, pubKey0, signature0);
         input.setSequenceNumber(TransactionInput.SEQUENCE_RBF_ENABLED);
 
         transaction.addOutput(4000, Address.fromString("1LiQZqSwPqb615uyxDKTaN9Tg4CER98cgJ"));
@@ -391,7 +531,7 @@ public class TransactionTest {
 
         Transaction transaction = new Transaction();
         transaction.setSegwitFlag(1);
-        TransactionInput input = ScriptType.P2SH_P2WSH.addMultisigSpendingInput(transaction, spent0Output, 2, pubKeySignatures);
+        TransactionInput input = ScriptType.P2SH_P2WSH.addMultisigSpendingInput(PolicyType.MULTI_HD, transaction, spent0Output, 2, pubKeySignatures);
 
         transaction.addOutput(59287429, Address.fromString("3PBjKH4FRuEKy4sD3NfL7tqfZTG5K42owu"));
         transaction.addOutput(212571, Address.fromString("3KRUgU4XGuErXkjBtFhksPzTGJ4AMwF4jB"));
@@ -425,7 +565,7 @@ public class TransactionTest {
         Transaction transaction = new Transaction();
         transaction.setVersion(2);
         transaction.setSegwitFlag(1);
-        spent0ScriptType.addSpendingInput(transaction, spent0Output, key0, signature0);
+        spent0ScriptType.addSpendingInput(PolicyType.SINGLE_HD, transaction, spent0Output, key0, signature0);
 
         transaction.addOutput(211584990, Address.fromString("bc1q9k6aan6ncahvlslw8w54jzv897k55zh077un6s"));
         transaction.addOutput(1806203, Address.fromString("3QLFcgKFNzo262FYRFgGfrUNiUurpQbDZv"));
@@ -467,7 +607,7 @@ public class TransactionTest {
 
         Transaction transaction = new Transaction();
         transaction.setSegwitFlag(1);
-        spent0ScriptType.addMultisigSpendingInput(transaction, spent0Output, 2, pubKeySignatures);
+        spent0ScriptType.addMultisigSpendingInput(PolicyType.MULTI_HD, transaction, spent0Output, 2, pubKeySignatures);
 
         transaction.addOutput(10900000, Address.fromString("3Dt17mpd8FDXBjP56rCD7a4Sx7wpL91uhn"));
         transaction.addOutput(332500000, Address.fromString("1K6igqzm36x8jxRTavPhgWXLVcVZVDTGc9"));

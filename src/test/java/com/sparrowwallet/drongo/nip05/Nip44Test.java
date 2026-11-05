@@ -32,7 +32,7 @@ public class Nip44Test {
 
     @Test
     public void testRoundTrip() {
-        byte[] sec1 = Utils.hexToBytes("0000000000000000000000000000000000000000000000000000000000000001");
+        byte[] sec1 = Utils.hexToBytes("0000000000000000000000000000000000000000000000000000000000000003");
         byte[] sec2 = Utils.hexToBytes("0000000000000000000000000000000000000000000000000000000000000002");
         ECKey key2 = ECKey.fromPrivate(sec2);
         byte[] pub2 = key2.getPubKey(true);

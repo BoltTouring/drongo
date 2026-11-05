@@ -59,10 +59,13 @@ public class TransactionWitness extends ChildMessage {
 
     protected void parse() throws ProtocolException {
         long pushCount = readVarInt();
-        for (int y = 0; y < pushCount; y++) {
+        if(pushCount < 0) {
+            throw new ProtocolException("Invalid witness push count: " + pushCount);
+        }
+        for(long y = 0; y < pushCount; y++) {
             long pushSize = readVarInt();
-            byte[] push = readBytes((int)pushSize);
-            setPush(y, push);
+            byte[] push = readBytes(pushSize);
+            setPush((int)y, push);
         }
     }
 
@@ -75,7 +78,7 @@ public class TransactionWitness extends ChildMessage {
             pushes = new ArrayList<>();
         }
 
-        while (i >= pushes.size()) {
+        while(i >= pushes.size()) {
             pushes.add(new byte[]{});
         }
         pushes.set(i, value);
@@ -87,7 +90,7 @@ public class TransactionWitness extends ChildMessage {
 
     public int getLength() {
         int length = new VarInt(pushes.size()).getSizeInBytes();
-        for (int i = 0; i < pushes.size(); i++) {
+        for(int i = 0; i < pushes.size(); i++) {
             byte[] push = pushes.get(i);
             length += new VarInt(push.length).getSizeInBytes();
             length += push.length;
@@ -109,7 +112,9 @@ public class TransactionWitness extends ChildMessage {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         try {
             bitcoinSerializeToStream(baos);
-        } catch(IOException e) { }
+        } catch(IOException e) {
+            //ignore, can't reach
+        }
 
         return baos.toByteArray();
     }
@@ -117,10 +122,10 @@ public class TransactionWitness extends ChildMessage {
     @Override
     public String toString() {
         StringBuilder builder = new StringBuilder();
-        for (byte[] push : pushes) {
-            if (push == null) {
+        for(byte[] push : pushes) {
+            if(push == null) {
                 builder.append("NULL");
-            } else if (push.length == 0) {
+            } else if(push.length == 0) {
                 builder.append("EMPTY");
             } else {
                 builder.append(Hex.toHexString(push));
@@ -134,7 +139,7 @@ public class TransactionWitness extends ChildMessage {
     public List<ScriptChunk> asScriptChunks() {
         List<ScriptChunk> scriptChunks = new ArrayList<>(pushes.size());
         for(byte[] push : pushes) {
-           scriptChunks.add(new ScriptChunk(ScriptChunk.getOpcodeForLength(push.length), push));
+            scriptChunks.add(new ScriptChunk(ScriptChunk.getOpcodeForLength(push.length), push));
         }
 
         return scriptChunks;
@@ -163,12 +168,20 @@ public class TransactionWitness extends ChildMessage {
 
     @Override
     public boolean equals(Object o) {
-        if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
-        TransactionWitness other = (TransactionWitness) o;
-        if (pushes.size() != other.pushes.size()) return false;
-        for (int i = 0; i < pushes.size(); i++) {
-            if (!Arrays.equals(pushes.get(i), other.pushes.get(i))) return false;
+        if(this == o) {
+            return true;
+        }
+        if(o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        TransactionWitness other = (TransactionWitness)o;
+        if(pushes.size() != other.pushes.size()) {
+            return false;
+        }
+        for(int i = 0; i < pushes.size(); i++) {
+            if(!Arrays.equals(pushes.get(i), other.pushes.get(i))) {
+                return false;
+            }
         }
         return true;
     }
@@ -176,7 +189,7 @@ public class TransactionWitness extends ChildMessage {
     @Override
     public int hashCode() {
         int hashCode = 1;
-        for (byte[] push : pushes) {
+        for(byte[] push : pushes) {
             hashCode = 31 * hashCode + (push == null ? 0 : Arrays.hashCode(push));
         }
         return hashCode;

@@ -59,11 +59,11 @@ public abstract class Address {
             return false;
         }
 
-        return Arrays.equals(data, address.data) && getVersion(Network.get()) == address.getVersion(Network.get());
+        return Arrays.equals(data, address.data) && getVersion(Network.get()) == address.getVersion(Network.get()) && getScriptType() == address.getScriptType();
     }
 
     public int hashCode() {
-        return Arrays.hashCode(data) + getVersion(Network.get());
+        return Arrays.hashCode(data) + getVersion(Network.get()) + getScriptType().hashCode();
     }
 
     public static Address fromString(String address) throws InvalidAddressException {
@@ -102,7 +102,7 @@ public abstract class Address {
                             return new P2SHAddress(hash);
                         }
                     }
-                } catch (Exception e) {
+                } catch(Exception e) {
                     nested = e;
                 }
             }
@@ -139,7 +139,7 @@ public abstract class Address {
                             }
                         }
                     }
-                } catch (Exception e) {
+                } catch(Exception e) {
                     nested = e;
                 }
             }

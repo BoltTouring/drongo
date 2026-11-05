@@ -19,6 +19,7 @@ import java.security.NoSuchAlgorithmException;
 import java.security.NoSuchProviderException;
 import java.security.SecureRandom;
 import java.security.spec.InvalidKeySpecException;
+import java.util.Arrays;
 import java.util.List;
 
 public class PaymentCodeTest {
@@ -65,7 +66,7 @@ public class PaymentCodeTest {
         Assertions.assertArrayEquals(alicePubKey.getPubKey(), alicePrivKey.getPubKey());
 
         DeterministicSeed bobSeed = new DeterministicSeed("reward upper indicate eight swift arch injury crystal super wrestle already dentist", "", 0, DeterministicSeed.Type.BIP39);
-        Keystore bobKeystore = Keystore.fromSeed(bobSeed, List.of(new ChildNumber(47, true), ChildNumber.ZERO_HARDENED, ChildNumber.ZERO_HARDENED));
+        Keystore bobKeystore = Keystore.fromSeed(bobSeed, PolicyType.SINGLE_HD, List.of(new ChildNumber(47, true), ChildNumber.ZERO_HARDENED, ChildNumber.ZERO_HARDENED));
         ECKey bobNotificationPrivKey = bobKeystore.getBip47ExtendedPrivateKey().getKey(List.of(ChildNumber.ZERO_HARDENED, new ChildNumber(0)));
 
         SecretPoint bobSecretPoint = new SecretPoint(bobNotificationPrivKey.getPrivKeyBytes(), alicePubKey.getPubKey());
@@ -92,22 +93,22 @@ public class PaymentCodeTest {
             List<String> receiveWords = bip39MnemonicCode.toMnemonic(receiveEntropy);
             DeterministicSeed receiveSeed = new DeterministicSeed(receiveWords, "", 0, DeterministicSeed.Type.BIP39);
             Wallet receiveWallet = new Wallet();
-            receiveWallet.setPolicyType(PolicyType.SINGLE);
+            receiveWallet.setPolicyType(PolicyType.SINGLE_HD);
             receiveWallet.setScriptType(ScriptType.P2WPKH);
-            Keystore receiveKeystore = Keystore.fromSeed(receiveSeed, receiveWallet.getScriptType().getDefaultDerivation());
+            Keystore receiveKeystore = Keystore.fromSeed(receiveSeed, PolicyType.SINGLE_HD, receiveWallet.getScriptType().getDefaultDerivation());
             receiveWallet.getKeystores().add(receiveKeystore);
-            receiveWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2WPKH, receiveWallet.getKeystores(), 1));
+            receiveWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2WPKH, receiveWallet.getKeystores(), 1));
 
             byte[] sendEntropy = new byte[128];
             secureRandom.nextBytes(sendEntropy);
             List<String> sendWords = bip39MnemonicCode.toMnemonic(sendEntropy);
             DeterministicSeed sendSeed = new DeterministicSeed(sendWords, "pp", 0, DeterministicSeed.Type.BIP39);
             Wallet sendWallet = new Wallet();
-            sendWallet.setPolicyType(PolicyType.SINGLE);
+            sendWallet.setPolicyType(PolicyType.SINGLE_HD);
             sendWallet.setScriptType(ScriptType.P2WPKH);
-            Keystore sendKeystore = Keystore.fromSeed(sendSeed, sendWallet.getScriptType().getDefaultDerivation());
+            Keystore sendKeystore = Keystore.fromSeed(sendSeed, PolicyType.SINGLE_HD, sendWallet.getScriptType().getDefaultDerivation());
             sendWallet.getKeystores().add(sendKeystore);
-            sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
+            sendWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2WPKH, sendWallet.getKeystores(), 1));
 
             PaymentCode paymentCode = sendWallet.getPaymentCode();
             PaymentCode externalPaymentCode = receiveWallet.getPaymentCode();
@@ -137,7 +138,7 @@ public class PaymentCodeTest {
     @Test
     public void testFromSeed() throws MnemonicException {
         DeterministicSeed aliceSeed = new DeterministicSeed("response seminar brave tip suit recall often sound stick owner lottery motion", "", 0, DeterministicSeed.Type.BIP39);
-        Keystore aliceKeystore = Keystore.fromSeed(aliceSeed, List.of(new ChildNumber(47, true), ChildNumber.ZERO_HARDENED, ChildNumber.ZERO_HARDENED));
+        Keystore aliceKeystore = Keystore.fromSeed(aliceSeed, PolicyType.SINGLE_HD, List.of(new ChildNumber(47, true), ChildNumber.ZERO_HARDENED, ChildNumber.ZERO_HARDENED));
 
         DeterministicKey bip47PubKey = aliceKeystore.getExtendedPublicKey().getKey();
         PaymentCode alicePaymentCode = new PaymentCode(bip47PubKey.getPubKey(), bip47PubKey.getChainCode());
@@ -147,28 +148,28 @@ public class PaymentCodeTest {
     @Test
     public void testPaymentAddress() throws MnemonicException, InvalidPaymentCodeException, NoSuchAlgorithmException, InvalidKeySpecException, InvalidKeyException, NoSuchProviderException, NotSecp256k1Exception {
         DeterministicSeed seed = new DeterministicSeed("response seminar brave tip suit recall often sound stick owner lottery motion", "", 0, DeterministicSeed.Type.BIP39);
-        Keystore keystore = Keystore.fromSeed(seed, List.of(new ChildNumber(47, true), ChildNumber.ZERO_HARDENED, ChildNumber.ZERO_HARDENED));
+        Keystore keystore = Keystore.fromSeed(seed, PolicyType.SINGLE_HD, List.of(new ChildNumber(47, true), ChildNumber.ZERO_HARDENED, ChildNumber.ZERO_HARDENED));
         DeterministicKey privateKey = keystore.getExtendedPrivateKey().getKey(List.of(ChildNumber.ZERO_HARDENED, ChildNumber.ZERO));
 
         PaymentCode paymentCodeBob = new PaymentCode("PM8TJS2JxQ5ztXUpBBRnpTbcUXbUHy2T1abfrb3KkAAtMEGNbey4oumH7Hc578WgQJhPjBxteQ5GHHToTYHE3A1w6p7tU6KSoFmWBVbFGjKPisZDbP97");
 
         PaymentAddress paymentAddress0 = new PaymentAddress(paymentCodeBob, 0, privateKey.getPrivKeyBytes());
         ECKey sendKey0 = paymentAddress0.getSendECKey();
-        Assertions.assertEquals("141fi7TY3h936vRUKh1qfUZr8rSBuYbVBK", ScriptType.P2PKH.getAddress(sendKey0).toString());
+        Assertions.assertEquals("141fi7TY3h936vRUKh1qfUZr8rSBuYbVBK", ScriptType.P2PKH.getAddress(PolicyType.SINGLE_HD, sendKey0).toString());
 
         PaymentAddress paymentAddress1 = new PaymentAddress(paymentCodeBob, 1, privateKey.getPrivKeyBytes());
         ECKey sendKey1 = paymentAddress1.getSendECKey();
-        Assertions.assertEquals("12u3Uued2fuko2nY4SoSFGCoGLCBUGPkk6", ScriptType.P2PKH.getAddress(sendKey1).toString());
+        Assertions.assertEquals("12u3Uued2fuko2nY4SoSFGCoGLCBUGPkk6", ScriptType.P2PKH.getAddress(PolicyType.SINGLE_HD, sendKey1).toString());
     }
 
     @Test
     public void testChildWallet() throws MnemonicException, InvalidPaymentCodeException {
         DeterministicSeed aliceSeed = new DeterministicSeed("response seminar brave tip suit recall often sound stick owner lottery motion", "", 0, DeterministicSeed.Type.BIP39);
         Wallet aliceWallet = new Wallet();
-        aliceWallet.setPolicyType(PolicyType.SINGLE);
+        aliceWallet.setPolicyType(PolicyType.SINGLE_HD);
         aliceWallet.setScriptType(ScriptType.P2PKH);
-        aliceWallet.getKeystores().add(Keystore.fromSeed(aliceSeed, aliceWallet.getScriptType().getDefaultDerivation()));
-        aliceWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2PKH, aliceWallet.getKeystores(), 1));
+        aliceWallet.getKeystores().add(Keystore.fromSeed(aliceSeed, PolicyType.SINGLE_HD, aliceWallet.getScriptType().getDefaultDerivation()));
+        aliceWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2PKH, aliceWallet.getKeystores(), 1));
 
         PaymentCode paymentCodeBob = new PaymentCode("PM8TJS2JxQ5ztXUpBBRnpTbcUXbUHy2T1abfrb3KkAAtMEGNbey4oumH7Hc578WgQJhPjBxteQ5GHHToTYHE3A1w6p7tU6KSoFmWBVbFGjKPisZDbP97");
 
@@ -193,10 +194,10 @@ public class PaymentCodeTest {
 
         DeterministicSeed bobSeed = new DeterministicSeed("reward upper indicate eight swift arch injury crystal super wrestle already dentist", "", 0, DeterministicSeed.Type.BIP39);
         Wallet bobWallet = new Wallet();
-        bobWallet.setPolicyType(PolicyType.SINGLE);
+        bobWallet.setPolicyType(PolicyType.SINGLE_HD);
         bobWallet.setScriptType(ScriptType.P2PKH);
-        bobWallet.getKeystores().add(Keystore.fromSeed(bobSeed, bobWallet.getScriptType().getDefaultDerivation()));
-        bobWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2PKH, bobWallet.getKeystores(), 1));
+        bobWallet.getKeystores().add(Keystore.fromSeed(bobSeed, PolicyType.SINGLE_HD, bobWallet.getScriptType().getDefaultDerivation()));
+        bobWallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2PKH, bobWallet.getKeystores(), 1));
 
         Wallet bobBip47Wallet = bobWallet.addChildWallet(paymentCodeAlice, ScriptType.P2PKH, "Bob");
         Assertions.assertEquals(paymentCodeBob.toString(), bobBip47Wallet.getKeystores().get(0).getPaymentCode().toString());
@@ -221,5 +222,46 @@ public class PaymentCodeTest {
         ECKey privKey1 = bobWallet.getKeystores().get(0).getKey(receiveNode1);
         ECKey pubKey1 = bobWallet.getKeystores().get(0).getPubKey(receiveNode1);
         Assertions.assertArrayEquals(privKey1.getPubKey(), pubKey1.getPubKey());
+    }
+
+    @Test
+    public void testOpReturnWithoutPushDataIsNotNotification() {
+        //Standard relay policy allows any opcode up to OP_16 after OP_RETURN, so these outputs can be sent by anyone
+        for(int opcode : List.of(ScriptOpCodes.OP_1NEGATE, ScriptOpCodes.OP_RESERVED, ScriptOpCodes.OP_1, ScriptOpCodes.OP_16)) {
+            Transaction transaction = new Transaction();
+            transaction.addOutput(0, new Script(List.of(ScriptChunk.fromOpcode(ScriptOpCodes.OP_RETURN), ScriptChunk.fromOpcode(opcode))));
+            Assertions.assertThrows(IllegalArgumentException.class, () -> PaymentCode.getOpReturnData(transaction));
+        }
+    }
+
+    @Test
+    public void testOpReturnPayloadLength() {
+        byte[] payload = getNotificationPayload();
+        Transaction transaction = new Transaction();
+        transaction.addOutput(0, new Script(List.of(ScriptChunk.fromOpcode(ScriptOpCodes.OP_RETURN), ScriptChunk.fromData(payload))));
+        Assertions.assertArrayEquals(payload, PaymentCode.getOpReturnData(transaction));
+
+        Transaction shortTransaction = new Transaction();
+        shortTransaction.addOutput(0, new Script(List.of(ScriptChunk.fromOpcode(ScriptOpCodes.OP_RETURN), ScriptChunk.fromData(Arrays.copyOf(payload, payload.length - 1)))));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> PaymentCode.getOpReturnData(shortTransaction));
+    }
+
+    @Test
+    public void testMalformedPaymentCodeIsInvalid() throws InvalidPaymentCodeException {
+        String strPaymentCode = "PM8TJTLJbPRGxSbc8EJi42Wrr6QbNSaSSVJ5Y3E4pbCYiTHUskHg13935Ubb7q8tx9GVbh2UuRnBc3WSyJHhUrw8KhprKnn9eDznYGieTzFcwQRya4GA";
+        Assertions.assertTrue(new PaymentCode(strPaymentCode).isValid());
+
+        String corruptedChecksum = strPaymentCode.substring(0, strPaymentCode.length() - 1) + "B";
+        String truncated = Base58.encodeChecked(Arrays.copyOf(Base58.decodeChecked(strPaymentCode), 40));
+        for(String malformed : Arrays.asList("not-a-payment-code", corruptedChecksum, truncated, null)) {
+            Assertions.assertThrows(InvalidPaymentCodeException.class, () -> new PaymentCode(malformed), String.valueOf(malformed));
+        }
+    }
+
+    public static byte[] getNotificationPayload() {
+        byte[] payload = new byte[80];
+        payload[0] = 0x01;
+        payload[2] = 0x02;
+        return payload;
     }
 }

@@ -1,12 +1,12 @@
 package com.sparrowwallet.drongo.crypto;
 
+import com.sparrowwallet.drongo.KeyDerivation;
 import com.sparrowwallet.drongo.Utils;
 import com.sparrowwallet.drongo.address.Address;
 import com.sparrowwallet.drongo.policy.PolicyType;
 import com.sparrowwallet.drongo.protocol.*;
 import com.sparrowwallet.drongo.psbt.PSBT;
 import com.sparrowwallet.drongo.psbt.PSBTInput;
-import com.sparrowwallet.drongo.psbt.PSBTInputSigner;
 import com.sparrowwallet.drongo.psbt.PSBTSignatureException;
 
 import java.nio.charset.StandardCharsets;
@@ -16,41 +16,117 @@ import java.util.*;
 import static com.sparrowwallet.drongo.protocol.ScriptType.P2TR;
 
 public class Bip322 {
+    public static final String SIMPLE_PREFIX = "smp";
+    public static final String FULL_PREFIX = "ful";
+    public static final String FULL_POF_PREFIX = "pof";
+
     public static String signMessageBip322(ScriptType scriptType, String message, ECKey privKey) {
         checkScriptType(scriptType);
 
         ECKey pubKey = ECKey.fromPublicOnly(privKey);
-        Address address = scriptType.getAddress(pubKey);
+        Address address = scriptType.getAddress(PolicyType.SINGLE_HD, pubKey);
+
+        PSBT psbt = getBip322Psbt(scriptType, address, message);
+        PSBTInput psbtInput = psbt.getPsbtInputs().getFirst();
+        psbtInput.sign(scriptType.getOutputKey(PolicyType.SINGLE_HD, privKey));
+
+        return getBip322SignatureFromPsbt(scriptType, psbt, pubKey);
+    }
+
+    public static PSBT getBip322Psbt(ScriptType scriptType, Address address, String message) {
+        checkScriptType(scriptType);
 
         Transaction toSpend = getBip322ToSpend(address, message);
         Transaction toSign = getBip322ToSign(toSpend);
-
-        TransactionOutput utxoOutput = toSpend.getOutputs().get(0);
+        TransactionOutput utxoOutput = toSpend.getOutputs().getFirst();
 
         PSBT psbt = new PSBT(toSign);
-        PSBTInput psbtInput = psbt.getPsbtInputs().get(0);
+        psbt.setGenericSignedMessage(message);
+        PSBTInput psbtInput = psbt.getPsbtInputs().getFirst();
         psbtInput.setWitnessUtxo(utxoOutput);
         psbtInput.setSigHash(SigHash.ALL);
-        psbtInput.sign(scriptType.getOutputKey(privKey));
 
-        TransactionSignature signature = psbtInput.isTaproot() ? psbtInput.getTapKeyPathSignature() : psbtInput.getPartialSignature(pubKey);
+        return psbt;
+    }
+
+    public static PSBT getBip322PsbtSp(Address address, String message, byte[] silentPaymentsTweak, Map<ECKey, KeyDerivation> spendDerivations) {
+        if(silentPaymentsTweak == null) {
+            throw new IllegalArgumentException("Silent payments tweak is required");
+        }
+
+        PSBT psbt = getBip322Psbt(P2TR, address, message);
+        PSBTInput psbtInput = psbt.getPsbtInputs().getFirst();
+        psbtInput.setSilentPaymentsTweak(silentPaymentsTweak);
+        if(spendDerivations != null && !spendDerivations.isEmpty()) {
+            psbtInput.getSilentPaymentsSpendDerivations().putAll(spendDerivations);
+        }
+
+        return psbt;
+    }
+
+    public static String signMessageBip322Sp(Address address, String message, ECKey spendPrivKey, byte[] silentPaymentsTweak) {
+        PSBT psbt = getBip322PsbtSp(address, message, silentPaymentsTweak, Collections.emptyMap());
+        PSBTInput psbtInput = psbt.getPsbtInputs().getFirst();
+
+        if(!psbtInput.signSilentPayments(spendPrivKey)) {
+            throw new IllegalStateException("Failed to sign BIP322 PSBT with silent payments tweak");
+        }
+
+        return getBip322SignatureFromPsbtSp(psbt);
+    }
+
+    public static String getBip322SignatureFromPsbtSp(PSBT signedPsbt) {
+        PSBTInput psbtInput = signedPsbt.getPsbtInputs().getFirst();
+        TransactionSignature signature = psbtInput.getTapKeyPathSignature();
+        if(signature == null) {
+            throw new IllegalArgumentException("PSBT does not contain a taproot keypath signature");
+        }
 
         Transaction finalizeTransaction = new Transaction();
-        TransactionInput finalizedTxInput = scriptType.addSpendingInput(finalizeTransaction, utxoOutput, pubKey, signature);
+        TransactionWitness witness = new TransactionWitness(finalizeTransaction, signature);
+        finalizeTransaction.addInput(Sha256Hash.ZERO_HASH, 0, new Script(new byte[0]), witness);
 
-        return Base64.getEncoder().encodeToString(finalizedTxInput.getWitness().toByteArray());
+        return SIMPLE_PREFIX + Base64.getEncoder().encodeToString(witness.toByteArray());
+    }
+
+    public static String getBip322SignatureFromPsbt(ScriptType scriptType, PSBT signedPsbt, ECKey pubKey) {
+        checkScriptType(scriptType);
+
+        PSBTInput psbtInput = signedPsbt.getPsbtInputs().getFirst();
+        TransactionSignature signature = psbtInput.isTaproot() ? psbtInput.getTapKeyPathSignature() : psbtInput.getPartialSignature(pubKey);
+
+        if(signature == null) {
+            throw new IllegalArgumentException("PSBT does not contain a signature");
+        }
+
+        TransactionOutput utxoOutput = psbtInput.getWitnessUtxo();
+        Transaction finalizeTransaction = new Transaction();
+        Script scriptSig = scriptType.getScriptSig(PolicyType.SINGLE_HD, utxoOutput.getScript(), pubKey, signature);
+        TransactionWitness witness = psbtInput.isTaproot() ? new TransactionWitness(finalizeTransaction, signature) : new TransactionWitness(finalizeTransaction, pubKey, signature);
+        TransactionInput finalizedTxInput = finalizeTransaction.addInput(Sha256Hash.ZERO_HASH, 0, scriptSig, witness);
+
+        return SIMPLE_PREFIX + Base64.getEncoder().encodeToString(finalizedTxInput.getWitness().toByteArray());
     }
 
     public static boolean verifyMessageBip322(ScriptType scriptType, Address address, String message, String signatureBase64) throws SignatureException {
         checkScriptType(scriptType);
 
-        if(signatureBase64.trim().isEmpty()) {
+        String trimmed = signatureBase64.trim();
+        if(trimmed.isEmpty()) {
             throw new SignatureException("Provided signature is empty.");
+        }
+
+        if(trimmed.startsWith(FULL_PREFIX) || trimmed.startsWith(FULL_POF_PREFIX)) {
+            throw new SignatureException("Only the simple BIP322 signature variant is supported.");
+        }
+
+        if(trimmed.startsWith(SIMPLE_PREFIX)) {
+            trimmed = trimmed.substring(SIMPLE_PREFIX.length());
         }
 
         byte[] signatureEncoded;
         try {
-            signatureEncoded = Base64.getDecoder().decode(signatureBase64);
+            signatureEncoded = Base64.getDecoder().decode(trimmed);
         } catch(IllegalArgumentException e) {
             throw new SignatureException("Could not decode base64 signature", e);
         }
@@ -74,17 +150,17 @@ public class Bip322 {
         }
 
         if(scriptType == ScriptType.P2WPKH) {
-            signature = witness.getSignatures().get(0);
+            signature = witness.getSignatures().getFirst();
             if(witness.getPushes().size() <= 1) {
                 throw new SignatureException("BIP322 simple signature for P2WPKH script type does not contain a pubkey.");
             }
             pubKey = ECKey.fromPublicOnly(witness.getPushes().get(1));
 
-            if(!address.equals(scriptType.getAddress(pubKey))) {
+            if(!address.equals(scriptType.getAddress(PolicyType.SINGLE_HD, pubKey))) {
                 throw new SignatureException("Provided address does not match pubkey in signature");
             }
         } else if(scriptType == ScriptType.P2TR) {
-            signature = witness.getSignatures().get(0);
+            signature = witness.getSignatures().getFirst();
             pubKey = P2TR.getPublicKeyFromScript(address.getOutputScript());
         } else {
             throw new SignatureException(scriptType + " addresses are not supported");
@@ -94,8 +170,8 @@ public class Bip322 {
         Transaction toSign = getBip322ToSign(toSpend);
 
         PSBT psbt = new PSBT(toSign);
-        PSBTInput psbtInput = psbt.getPsbtInputs().get(0);
-        psbtInput.setWitnessUtxo(toSpend.getOutputs().get(0));
+        PSBTInput psbtInput = psbt.getPsbtInputs().getFirst();
+        psbtInput.setWitnessUtxo(toSpend.getOutputs().getFirst());
         psbtInput.setSigHash(SigHash.ALL);
 
         if(scriptType == ScriptType.P2TR) {
@@ -114,7 +190,7 @@ public class Bip322 {
     }
 
     private static void checkScriptType(ScriptType scriptType) {
-        if(!scriptType.isAllowed(PolicyType.SINGLE)) {
+        if(!scriptType.isAllowed(PolicyType.SINGLE_HD)) {
             throw new UnsupportedOperationException("Only singlesig addresses are currently supported");
         }
 
@@ -141,7 +217,7 @@ public class Bip322 {
         scriptSigChunks.add(ScriptChunk.fromData(getBip322MessageHash(message)));
         Script scriptSig = new Script(scriptSigChunks);
         toSpend.addInput(Sha256Hash.ZERO_HASH, 0xFFFFFFFFL, scriptSig, new TransactionWitness(toSpend, Collections.emptyList()));
-        toSpend.getInputs().get(0).setSequenceNumber(0L);
+        toSpend.getInputs().getFirst().setSequenceNumber(0L);
         toSpend.addOutput(0L, address.getOutputScript());
 
         return toSpend;
@@ -154,7 +230,7 @@ public class Bip322 {
 
         TransactionWitness witness = new TransactionWitness(toSign);
         toSign.addInput(toSpend.getTxId(), 0L, new Script(new byte[0]), witness);
-        toSign.getInputs().get(0).setSequenceNumber(0L);
+        toSign.getInputs().getFirst().setSequenceNumber(0L);
         toSign.addOutput(0, new Script(List.of(ScriptChunk.fromOpcode(ScriptOpCodes.OP_RETURN))));
 
         return toSign;

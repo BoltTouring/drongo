@@ -28,14 +28,13 @@ public class PSBTEntry {
     public PSBTEntry(ByteBuffer psbtByteBuffer) throws PSBTParseException {
         int keyLen = readCompactInt(psbtByteBuffer);
 
-        if (keyLen == 0x00) {
+        if(keyLen == 0x00) {
             key = null;
             keyType = 0x00;
             keyData = null;
             data = null;
         } else {
-            byte[] key = new byte[keyLen];
-            psbtByteBuffer.get(key);
+            byte[] key = readBytes(psbtByteBuffer, keyLen, "entry key");
 
             ByteBuffer keyBuf = ByteBuffer.wrap(key);
             int keyType = readCompactInt(keyBuf);
@@ -47,8 +46,7 @@ public class PSBTEntry {
             }
 
             int dataLen = readCompactInt(psbtByteBuffer);
-            byte[] data = new byte[dataLen];
-            psbtByteBuffer.get(data);
+            byte[] data = readBytes(psbtByteBuffer, dataLen, "entry data");
 
             this.key = key;
             this.keyType = keyType;
@@ -99,7 +97,11 @@ public class PSBTEntry {
         return Utils.bytesToHex(data);
     }
 
-    public static List<ChildNumber> readBIP32Derivation(byte[] data) {
+    public static List<ChildNumber> readBIP32Derivation(byte[] data) throws PSBTParseException {
+        if(data.length == 0 || data.length % 4 != 0) {
+            throw new PSBTParseException("Invalid BIP32 derivation of " + data.length + " bytes, must be a whole number of child numbers");
+        }
+
         List<ChildNumber> path = new ArrayList<>();
 
         ByteBuffer bb = ByteBuffer.wrap(data);
@@ -151,7 +153,7 @@ public class PSBTEntry {
         }
 
         ByteBuffer bb = ByteBuffer.wrap(data);
-        int strLen = bb.get();
+        int strLen = bb.get() & 0xff;
         if(data.length < strLen + 1) {
             throw new PSBTParseException("Invalid string length of " + strLen + " provided for DNSSEC proof");
         }
@@ -213,57 +215,70 @@ public class PSBTEntry {
     }
 
     public static int readCompactInt(ByteBuffer psbtByteBuffer) throws PSBTParseException {
+        if(!psbtByteBuffer.hasRemaining()) {
+            throw new PSBTParseException("PSBT is truncated - no bytes remain to read a compact size integer");
+        }
+
         byte b = psbtByteBuffer.get();
 
-        switch (b) {
-            case (byte) 0xfd: {
-                byte[] buf = new byte[2];
-                psbtByteBuffer.get(buf);
-                ByteBuffer byteBuffer = ByteBuffer.wrap(buf);
+        switch(b) {
+            case (byte)0xfd: {
+                ByteBuffer byteBuffer = ByteBuffer.wrap(readBytes(psbtByteBuffer, 2, "compact size integer"));
                 byteBuffer.order(ByteOrder.LITTLE_ENDIAN);
                 return Short.toUnsignedInt(byteBuffer.getShort());
             }
-            case (byte) 0xfe: {
-                byte[] buf = new byte[4];
-                psbtByteBuffer.get(buf);
-                ByteBuffer byteBuffer = ByteBuffer.wrap(buf);
+            case (byte)0xfe: {
+                ByteBuffer byteBuffer = ByteBuffer.wrap(readBytes(psbtByteBuffer, 4, "compact size integer"));
                 byteBuffer.order(ByteOrder.LITTLE_ENDIAN);
-                return byteBuffer.getInt();
+                long value = Integer.toUnsignedLong(byteBuffer.getInt());
+                if(value > Integer.MAX_VALUE) {
+                    throw new PSBTParseException("Data too long:" + value);
+                }
+                return (int)value;
             }
-            case (byte) 0xff: {
-                byte[] buf = new byte[8];
-                psbtByteBuffer.get(buf);
-                ByteBuffer byteBuffer = ByteBuffer.wrap(buf);
+            case (byte)0xff: {
+                ByteBuffer byteBuffer = ByteBuffer.wrap(readBytes(psbtByteBuffer, 8, "compact size integer"));
                 byteBuffer.order(ByteOrder.LITTLE_ENDIAN);
                 throw new PSBTParseException("Data too long:" + byteBuffer.getLong());
             }
             default:
-                return (int) (b & 0xff);
+                return (int)(b & 0xff);
         }
+    }
+
+    private static byte[] readBytes(ByteBuffer psbtByteBuffer, int length, String type) throws PSBTParseException {
+        if(length > psbtByteBuffer.remaining()) {
+            throw new PSBTParseException("PSBT is truncated - cannot read " + length + " bytes of " + type + " from the remaining " + psbtByteBuffer.remaining());
+        }
+
+        byte[] bytes = new byte[length];
+        psbtByteBuffer.get(bytes);
+
+        return bytes;
     }
 
     public static byte[] writeCompactInt(long val) {
         ByteBuffer bb = null;
 
-        if (val < 0xfdL) {
+        if(val < 0xfdL) {
             bb = ByteBuffer.allocate(1);
             bb.order(ByteOrder.LITTLE_ENDIAN);
-            bb.put((byte) val);
-        } else if (val < 0xffffL) {
+            bb.put((byte)val);
+        } else if(val <= 0xffffL) {
             bb = ByteBuffer.allocate(3);
             bb.order(ByteOrder.LITTLE_ENDIAN);
-            bb.put((byte) 0xfd);
-            bb.put((byte) (val & 0xff));
-            bb.put((byte) ((val >> 8) & 0xff));
-        } else if (val < 0xffffffffL) {
+            bb.put((byte)0xfd);
+            bb.put((byte)(val & 0xff));
+            bb.put((byte)((val >> 8) & 0xff));
+        } else if(val <= 0xffffffffL) {
             bb = ByteBuffer.allocate(5);
             bb.order(ByteOrder.LITTLE_ENDIAN);
-            bb.put((byte) 0xfe);
-            bb.putInt((int) val);
+            bb.put((byte)0xfe);
+            bb.putInt((int)val);
         } else {
             bb = ByteBuffer.allocate(9);
             bb.order(ByteOrder.LITTLE_ENDIAN);
-            bb.put((byte) 0xff);
+            bb.put((byte)0xff);
             bb.putLong(val);
         }
 
@@ -291,6 +306,12 @@ public class PSBTEntry {
     public void checkOneBytePlusXOnlyPubKey() throws PSBTParseException {
         if(this.getKey().length != 33) {
             throw new PSBTParseException("PSBT key type must be one byte plus x only pub key");
+        }
+    }
+
+    public void checkOneBytePlusKeyData() throws PSBTParseException {
+        if(this.getKey().length < 2) {
+            throw new PSBTParseException("PSBT key type must be one byte plus key data");
         }
     }
 

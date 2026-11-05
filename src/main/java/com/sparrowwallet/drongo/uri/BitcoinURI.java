@@ -1,11 +1,13 @@
 package com.sparrowwallet.drongo.uri;
 
 import com.sparrowwallet.drongo.Network;
+import com.sparrowwallet.drongo.Utils;
 import com.sparrowwallet.drongo.address.Address;
 import com.sparrowwallet.drongo.address.InvalidAddressException;
 import com.sparrowwallet.drongo.silentpayments.SilentPayment;
 import com.sparrowwallet.drongo.silentpayments.SilentPaymentAddress;
 import com.sparrowwallet.drongo.wallet.Payment;
+import com.sparrowwallet.drongo.wallet.Wallet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -17,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
 import java.util.*;
+import java.util.regex.Pattern;
 
 import static com.sparrowwallet.drongo.protocol.Transaction.*;
 
@@ -48,8 +51,8 @@ import static com.sparrowwallet.drongo.protocol.Transaction.*;
  *
  * <p>The following names are known and have the following formats:</p>
  * <ul>
- * <li>{@code amount} decimal value to 8 dp (e.g. 0.12345678) <b>Note that the
- * exponent notation is not supported any more</b></li>
+ * <li>{@code amount} decimal value to 8 dp (e.g. 0.12345678), where either {@code .} or {@code ,} may be used as the
+ * decimal separator <b>Note that the exponent notation is not supported any more</b></li>
  * <li>{@code label} any URL encoded alphanumeric</li>
  * <li>{@code message} any URL encoded alphanumeric</li>
  * </ul>
@@ -75,6 +78,7 @@ public class BitcoinURI {
     private static final String ENCODED_SPACE_CHARACTER = "%20";
     private static final String AMPERSAND_SEPARATOR = "&";
     private static final String QUESTION_MARK_SEPARATOR = "?";
+    private static final Pattern AMOUNT_PATTERN = Pattern.compile("\\d+(?:[.,]\\d*)?|[.,]\\d+");
 
     public static final DecimalFormat BTC_FORMAT = new DecimalFormat("0", DecimalFormatSymbols.getInstance(Locale.ENGLISH));
     public static final int SMALLEST_UNIT_EXPONENT = 8;
@@ -104,7 +108,7 @@ public class BitcoinURI {
         // URI is formed as  bitcoin:<address>?<query parameters>
         // blockchain.info generates URIs of non-BIP compliant form bitcoin://address?....
 
-        if (!BITCOIN_SCHEME.equalsIgnoreCase(uri.getScheme())) {
+        if(!BITCOIN_SCHEME.equalsIgnoreCase(uri.getScheme())) {
             throw new BitcoinURIParseException("Unsupported URI scheme: " + uri.getScheme());
         }
 
@@ -164,6 +168,10 @@ public class BitcoinURI {
             // Parse the amount.
             if(FIELD_AMOUNT.equals(nameToken) && !valueToken.isEmpty()) {
                 // Decode the amount (contains an optional decimal component to 8dp).
+                if(!AMOUNT_PATTERN.matcher(valueToken).matches()) {
+                    throw new OptionalFieldValidationException(String.format(Locale.US, "'%s' is not a valid amount", valueToken));
+                }
+
                 try {
                     long amount = new BigDecimal(valueToken.replace(',', '.')).movePointRight(SMALLEST_UNIT_EXPONENT).longValueExact();
                     if(amount > MAX_BITCOIN * SATOSHIS_PER_BITCOIN) {
@@ -275,10 +283,10 @@ public class BitcoinURI {
         if(payjoinUrl != null) {
             try {
                 URI uri = new URI(payjoinUrl);
-                if(uri.getScheme().equals("https") || uri.getHost().endsWith(".onion")) {
+                if(Utils.isSecureUrl(uri)) {
                     return uri;
                 } else {
-                    log.error("Insecure payjoin URL provided, must be https or .onion: " + payjoinUrl);
+                    log.error("Insecure payjoin URL provided, must be https or http .onion: " + payjoinUrl);
                 }
             } catch(URISyntaxException e) {
                 log.error("Invalid payjoin URL provided", e);
@@ -339,12 +347,20 @@ public class BitcoinURI {
         return uriString;
     }
 
-    public Payment toPayment() {
+    /**
+     * Returns the payment this URI describes, preferring its silent payment address wherever the given wallet can pay one. BIP-321 carries newer
+     * address formats in query parameters so that the address in the body can serve as a fallback for senders that do not understand them, so a
+     * recipient publishing both intends a capable sender to use the silent payment address rather than reuse the static one.
+     *
+     * @param wallet the wallet the payment will be sent from, or null where the sending wallet is not yet known
+     */
+    public Payment toPayment(Wallet wallet) {
         long amount = getAmount() == null ? -1 : getAmount();
         SilentPaymentAddress silentPaymentAddress = getSilentPaymentAddress();
-        if(getAddress() == null && silentPaymentAddress != null) {
+        if(silentPaymentAddress != null && (getAddress() == null || (wallet != null && wallet.canSendSilentPayments()))) {
             return new SilentPayment(silentPaymentAddress, getLabel(), amount, false);
         }
+
         return new Payment(getAddress(), getLabel(), amount, false);
     }
 

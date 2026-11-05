@@ -51,7 +51,9 @@ public class MnemonicException extends Exception {
      * Thrown when a word is encountered which is not in the MnemonicCode's word list.
      */
     public static class MnemonicWordException extends MnemonicException {
-        /** Contains the word that was not found in the word list. */
+        /**
+         * Contains the word that was not found in the word list.
+         */
         public final String badWord;
 
         public MnemonicWordException(String badWord) {
@@ -61,7 +63,7 @@ public class MnemonicException extends Exception {
     }
 
     /**
-     * Thrown when the mnemonic is valid, but for for the expected standard
+     * Thrown when the mnemonic is valid, but not for the expected standard
      */
     public static class MnemonicTypeException extends MnemonicException {
         public final DeterministicSeed.Type invalidType;

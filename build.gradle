@@ -18,22 +18,22 @@ repositories {
 }
 
 dependencies {
-    implementation ('org.bouncycastle:bcprov-jdk18on:1.80')
-    implementation('org.pgpainless:pgpainless-core:1.7.5') {
+    implementation ('org.bouncycastle:bcprov-jdk18on:1.82')
+    implementation('org.pgpainless:pgpainless-core:1.7.7') {
         exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-common'
     }
     implementation ('de.mkammerer:argon2-jvm:2.12') {
         exclude group: 'net.java.dev.jna', module: 'jna'
     }
-    implementation('dnsjava:dnsjava:3.6.3')
-    implementation('com.github.ben-manes.caffeine:caffeine:3.2.2')
+    implementation('dnsjava:dnsjava:3.6.4')
+    implementation('com.github.ben-manes.caffeine:caffeine:3.2.3')
     implementation ('net.java.dev.jna:jna:5.18.1')
     implementation ('ch.qos.logback:logback-classic:1.5.32') {
         exclude group: 'org.slf4j'
     }
     implementation ('org.slf4j:slf4j-api:2.0.17')
-    testImplementation('org.junit.jupiter:junit-jupiter-api:5.10.0')
-    testRuntimeOnly('org.junit.jupiter:junit-jupiter-engine:5.10.0')
+    testImplementation('org.junit.jupiter:junit-jupiter-api:5.14.1')
+    testRuntimeOnly('org.junit.jupiter:junit-jupiter-engine:5.14.1')
     testRuntimeOnly('org.junit.platform:junit-platform-launcher')
 }
 
@@ -42,11 +42,4 @@ test {
     jvmArgs = ["--enable-native-access=ALL-UNNAMED"]
 }
 
-processResources {
-    doLast {
-        delete fileTree("$buildDir/resources/main/native").matching {
-            exclude "${osName}/**"
-        }
-    }
-}
 

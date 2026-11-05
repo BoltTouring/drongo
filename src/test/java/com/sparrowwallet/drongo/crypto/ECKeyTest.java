@@ -18,11 +18,11 @@ public class ECKeyTest {
         String words = "absent essay fox snake vast pumpkin height crouch silent bulb excuse razor";
         DeterministicSeed seed = new DeterministicSeed(words, "", 0, DeterministicSeed.Type.BIP39);
         Wallet wallet = new Wallet();
-        wallet.setPolicyType(PolicyType.SINGLE);
+        wallet.setPolicyType(PolicyType.SINGLE_HD);
         wallet.setScriptType(ScriptType.P2PKH);
-        Keystore keystore = Keystore.fromSeed(seed, wallet.getScriptType().getDefaultDerivation());
+        Keystore keystore = Keystore.fromSeed(seed, PolicyType.SINGLE_HD, wallet.getScriptType().getDefaultDerivation());
         wallet.getKeystores().add(keystore);
-        wallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE, ScriptType.P2PKH, wallet.getKeystores(), 1));
+        wallet.setDefaultPolicy(Policy.getPolicy(PolicyType.SINGLE_HD, ScriptType.P2PKH, wallet.getKeystores(), 1));
 
         WalletNode firstReceive = wallet.getNode(KeyPurpose.RECEIVE).getChildren().iterator().next();
         Address address = firstReceive.getAddress();
@@ -68,7 +68,7 @@ public class ECKeyTest {
         // the y-coordinate of the resulting tweaked pubkey in this sample is odd, so the full pubkey will have 0x03 prefix
         Assertions.assertEquals("03" + expectedTweakedPubKey, Utils.bytesToHex(tweakedOutputKey.getPubKey()));
         // assert that the generated address matches the test vector
-        Address address = ScriptType.P2TR.getAddress(internalPubKey);
+        Address address = ScriptType.P2TR.getAddress(PolicyType.SINGLE_HD, internalPubKey);
         Assertions.assertEquals(expectedAddress, address.toString());
     }
 }
